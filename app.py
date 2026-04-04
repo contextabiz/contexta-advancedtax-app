@@ -1669,9 +1669,6 @@ def render_answer_summary_sheet(
     result: dict,
     province_name: str,
     readiness_df: pd.DataFrame,
-    quick_review_items: list[str],
-    top_warning_items: list[str],
-    top_override_items: list[str],
 ) -> None:
     ready_count = int((readiness_df["Status"] == "Ready").sum()) if not readiness_df.empty else 0
     review_count = int((readiness_df["Status"] == "Review").sum()) if not readiness_df.empty else 0
@@ -3418,110 +3415,116 @@ with st.expander("2) Income and Investment (Optional if not already covered by s
     t4_reference_box52_total = (
         float(t4_wizard_totals.get("box52_pension_adjustment", 0.0))
     )
-    st.markdown("#### Input Totals and T4 Reference")
-    st.dataframe(
-        build_currency_df(
-            [
-                {"Group": "Income Totals", "Item": "Employment incl. T4", "Amount": employment_income},
-                {"Group": "Income Totals", "Item": "Pension incl. T4A", "Amount": pension_income},
-                {"Group": "Income Totals", "Item": "RRSP / RRIF Income", "Amount": rrsp_rrif_income_manual},
-                {"Group": "Income Totals", "Item": "Other incl. T4A", "Amount": other_income},
-                {"Group": "Income Totals", "Item": "Interest incl. T5/T3", "Amount": interest_income},
-                {"Group": "Income Totals", "Item": "Net Rental incl. T776", "Amount": net_rental_income},
-                {
-                    "Group": "Income Totals",
-                    "Item": "Taxable Capital Gains incl. Schedule 3",
-                    "Amount": taxable_capital_gains,
-                },
-                {
-                    "Group": "Income Totals",
-                    "Item": "Current-Year Allowable Capital Loss",
-                    "Amount": schedule3_allowable_capital_loss,
-                },
-                {
-                    "Group": "Slip Totals",
-                    "Item": "Wizard T4 Income",
-                    "Amount": float(t4_wizard_totals.get("box14_employment_income", 0.0)),
-                },
-                {
-                    "Group": "Slip Totals",
-                    "Item": "Wizard T4 Tax Withheld",
-                    "Amount": float(t4_wizard_totals.get("box22_tax_withheld", 0.0)),
-                },
-                {
-                    "Group": "Slip Totals",
-                    "Item": "Wizard T4 RPP",
-                    "Amount": float(t4_wizard_totals.get("box20_rpp", 0.0)),
-                },
-                {
-                    "Group": "Slip Totals",
-                    "Item": "Wizard Union Dues",
-                    "Amount": float(t4_wizard_totals.get("box44_union_dues", 0.0)),
-                },
-                {
-                    "Group": "Slip Totals",
-                    "Item": "Wizard T4A Pension",
-                    "Amount": float(t4a_wizard_totals.get("box16_pension", 0.0)),
-                },
-                {
-                    "Group": "Slip Totals",
-                    "Item": "Wizard T5 Interest",
-                    "Amount": float(t5_wizard_totals.get("box13_interest", 0.0)),
-                },
-                {
-                    "Group": "Slip Totals",
-                    "Item": "Federal Dividend Credit From Slip Boxes",
-                    "Amount": federal_dividend_credit_slip_total,
-                },
-                {
-                    "Group": "Slip Totals",
-                    "Item": "Wizard T3 Other Income",
-                    "Amount": float(t3_wizard_totals.get("box26_other_income", 0.0)),
-                },
-                {
-                    "Group": "Slip Totals",
-                    "Item": "Wizard T3 Box 21 Capital Gains",
-                    "Amount": t3_box21_capital_amount,
-                },
-                {
-                    "Group": "Slip Totals",
-                    "Item": "Wizard T2202 Tuition",
-                    "Amount": max(
-                        float(t2202_wizard_totals.get("box26_total_eligible_tuition", 0.0)),
-                        float(t2202_wizard_totals.get("box23_session_tuition", 0.0)),
-                    ),
-                },
-                {
-                    "Group": "Slip Totals",
-                    "Item": "T4PS Box 34 Capital Gain/Loss",
-                    "Amount": t4ps_box34_capital_amount,
-                },
-                {
-                    "Group": "Slip Totals",
-                    "Item": "T4PS Box 41 EPSP Contributions (Reference)",
-                    "Amount": t4ps_box41_epsp_contributions,
-                },
-                {
-                    "Group": "T4 Reference",
-                    "Item": "T4 Box 24 EI Insurable Earnings",
-                    "Amount": t4_reference_box24_total,
-                },
-                {
-                    "Group": "T4 Reference",
-                    "Item": "T4 Box 26 CPP Pensionable Earnings",
-                    "Amount": t4_reference_box26_total,
-                },
-                {
-                    "Group": "T4 Reference",
-                    "Item": "T4 Box 52 Pension Adjustment",
-                    "Amount": t4_reference_box52_total,
-                },
-            ],
-            ["Amount"],
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
+    with st.expander("Input Totals and T4 Reference", expanded=False):
+        st.dataframe(
+            build_currency_df(
+                [
+                    {"Group": "Income Totals", "Item": "Employment incl. T4", "Amount": employment_income},
+                    {"Group": "Income Totals", "Item": "Pension incl. T4A", "Amount": pension_income},
+                    {"Group": "Income Totals", "Item": "RRSP / RRIF Income", "Amount": rrsp_rrif_income_manual},
+                    {"Group": "Income Totals", "Item": "Other incl. T4A", "Amount": other_income},
+                    {"Group": "Income Totals", "Item": "Interest incl. T5/T3", "Amount": interest_income},
+                    {"Group": "Income Totals", "Item": "Net Rental incl. T776", "Amount": net_rental_income},
+                    {
+                        "Group": "Income Totals",
+                        "Item": "Taxable Capital Gains incl. Schedule 3",
+                        "Amount": taxable_capital_gains,
+                    },
+                    {
+                        "Group": "Income Totals",
+                        "Item": "Current-Year Allowable Capital Loss",
+                        "Amount": schedule3_allowable_capital_loss,
+                    },
+                    {
+                        "Group": "Slip Totals",
+                        "Item": "Wizard T4 Income",
+                        "Amount": float(t4_wizard_totals.get("box14_employment_income", 0.0)),
+                    },
+                    {
+                        "Group": "Slip Totals",
+                        "Item": "Wizard T4 Tax Withheld",
+                        "Amount": float(t4_wizard_totals.get("box22_tax_withheld", 0.0)),
+                    },
+                    {
+                        "Group": "Slip Totals",
+                        "Item": "Wizard T4 RPP",
+                        "Amount": float(t4_wizard_totals.get("box20_rpp", 0.0)),
+                    },
+                    {
+                        "Group": "Slip Totals",
+                        "Item": "Wizard Union Dues",
+                        "Amount": float(t4_wizard_totals.get("box44_union_dues", 0.0)),
+                    },
+                    {
+                        "Group": "Slip Totals",
+                        "Item": "Wizard T4A Pension",
+                        "Amount": float(t4a_wizard_totals.get("box16_pension", 0.0)),
+                    },
+                    {
+                        "Group": "Slip Totals",
+                        "Item": "Wizard T5 Interest",
+                        "Amount": float(t5_wizard_totals.get("box13_interest", 0.0)),
+                    },
+                    {
+                        "Group": "Slip Totals",
+                        "Item": "Federal Dividend Credit From Slip Boxes",
+                        "Amount": federal_dividend_credit_slip_total,
+                    },
+                    {
+                        "Group": "Slip Totals",
+                        "Item": "Wizard T3 Other Income",
+                        "Amount": float(t3_wizard_totals.get("box26_other_income", 0.0)),
+                    },
+                    {
+                        "Group": "Slip Totals",
+                        "Item": "Wizard T3 Box 21 Capital Gains",
+                        "Amount": t3_box21_capital_amount,
+                    },
+                    {
+                        "Group": "Slip Totals",
+                        "Item": "Wizard T2202 Tuition",
+                        "Amount": max(
+                            float(t2202_wizard_totals.get("box26_total_eligible_tuition", 0.0)),
+                            float(t2202_wizard_totals.get("box23_session_tuition", 0.0)),
+                        ),
+                    },
+                    {
+                        "Group": "Slip Totals",
+                        "Item": "T4PS Box 34 Capital Gain/Loss",
+                        "Amount": t4ps_box34_capital_amount,
+                    },
+                    {
+                        "Group": "Slip Totals",
+                        "Item": "T4PS Box 41 EPSP Contributions (Reference)",
+                        "Amount": t4ps_box41_epsp_contributions,
+                    },
+                ],
+                ["Amount"],
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(
+            build_currency_df(
+                [
+                    {
+                        "Item": "T4 Box 24 EI Insurable Earnings",
+                        "Amount": t4_reference_box24_total,
+                    },
+                    {
+                        "Item": "T4 Box 26 CPP Pensionable Earnings",
+                        "Amount": t4_reference_box26_total,
+                    },
+                    {
+                        "Item": "T4 Box 52 Pension Adjustment",
+                        "Amount": t4_reference_box52_total,
+                    },
+                ],
+                ["Amount"],
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 with st.expander("3) Deductions (Optional)", expanded=False):
     st.caption("Use this section only if you have deductions that reduce income, such as RRSP or FHSA contributions, moving expenses, child care, support payments, or investment carrying charges. If you only have slips and no extra deductions, you can usually skip it.")
@@ -3581,7 +3584,7 @@ rpp_contribution += float(t4_wizard_totals.get("box20_rpp", 0.0))
 union_dues += float(t4_wizard_totals.get("box44_union_dues", 0.0))
 
 with st.expander("4) Credits, Carryforwards, and Special Cases (Optional)", expanded=False):
-    st.caption("Most users only need one or two parts of this section. Start with common credits, then open household, foreign tax, carryforwards, or province-specific areas only if they apply to you.")
+    st.caption("Most users only need one or two parts of this section. Open the rest only if they apply to you.")
     st.markdown("#### Common Credits And Claim Amounts")
     st.caption("Open this part if you have tuition, medical expenses, donations, student loan interest, or other common claim amounts.")
     with st.expander("Household And Dependants", expanded=False):
@@ -3772,16 +3775,6 @@ with st.expander("4) Credits, Carryforwards, and Special Cases (Optional)", expa
                 "Use this only if you have more than one dependant to review. These rows feed the caregiver, disability transfer, and dependant-medical pools.",
                 count_default=0,
             )
-            if len(additional_dependants_df.index):
-                render_metric_row(
-                    [
-                        ("Additional Dependants", float(len(additional_dependants_df.index))),
-                        ("Additional Caregiver Pool", float(additional_dependants_df.loc[additional_dependants_df["infirm"].eq("Yes") & additional_dependants_df["category"].isin({"Adult child", "Parent/Grandparent", "Other adult relative"}), "caregiver_claim_amount"].sum()) if not additional_dependants_df.empty else 0.0),
-                        ("Additional Disability Transfer Pool", float(additional_dependants_df.loc[additional_dependants_df["infirm"].eq("Yes"), "disability_transfer_available_amount"].sum()) if not additional_dependants_df.empty else 0.0),
-                        ("Additional Medical Pool", float(additional_dependants_df.loc[additional_dependants_df["lived_with_you"].eq("Yes") & additional_dependants_df["medical_claim_shared"].eq("No"), "medical_expenses_amount"].sum()) if not additional_dependants_df.empty else 0.0),
-                    ],
-                    4,
-                )
     additional_dependant_count = len(additional_dependants_df.index)
     additional_dependant_caregiver_claim_total = 0.0
     additional_dependant_disability_transfer_available_total = 0.0
@@ -3805,16 +3798,6 @@ with st.expander("4) Credits, Carryforwards, and Special Cases (Optional)", expa
                 additional_dependants_df["lived_with_you_bool"] & ~additional_dependants_df["medical_claim_shared_bool"],
                 "medical_expenses_amount",
             ].sum()
-        )
-    if additional_dependant_count:
-        render_metric_row(
-            [
-                ("Additional Dependants", float(additional_dependant_count)),
-                ("Additional Caregiver Pool", additional_dependant_caregiver_claim_total),
-                ("Additional Disability Transfer Pool", additional_dependant_disability_transfer_available_total),
-                ("Additional Medical Pool", additional_dependant_medical_claim_total),
-            ],
-            4,
         )
     spouse_amount_claim = number_input(
         "Spouse / Common-Law Claim Amount",
@@ -3955,16 +3938,6 @@ with st.expander("4) Credits, Carryforwards, and Special Cases (Optional)", expa
         + manual_provincial_refundable_credits
         + refundable_credits
     )
-    render_metric_row(
-        [
-            ("CWB Manual Amount", canada_workers_benefit),
-            ("CWB Disability Eligible", float(cwb_disability_supplement_eligible)),
-            ("Training Credit Limit", canada_training_credit_limit_available),
-            ("Medical Supplement Manual Amount", medical_expense_supplement),
-        ],
-        4,
-    )
-    st.caption("Automatic refundable estimates currently include Canada Workers Benefit, Canada Training Credit, Medical Expense Supplement, and CPP/EI overpayment refunds.")
     with st.expander("Province-Specific Credits And Schedules", expanded=False):
         st.caption("Open this only if you are adding province-specific claim amounts or special schedule inputs.")
         on_col1, on_col2, on_col3 = st.columns(3)
@@ -4069,9 +4042,7 @@ with st.expander("4) Credits, Carryforwards, and Special Cases (Optional)", expa
             float(t5_wizard_totals.get("box16_foreign_tax_paid", 0.0))
             + float(t3_wizard_totals.get("box34_foreign_tax_paid", 0.0))
         )
-        st.caption(
-            "Slip amounts from T5, T3, and T4PS are already added automatically. Only use the manual foreign-income and foreign-tax fields above for extra amounts that are missing from slips."
-        )
+        st.caption("Slip amounts from T5, T3, and T4PS are already added automatically. Only enter extra amounts missing from slips.")
 
         with st.expander("Advanced Foreign Tax Manual Amounts", expanded=False):
             st.caption("Leave all manual amounts at 0 unless you are checking the T2209 or T2036 worksheet manually.")
@@ -4117,27 +4088,28 @@ with st.expander("4) Credits, Carryforwards, and Special Cases (Optional)", expa
                 help="Optional override for the T2036 provincial tax otherwise payable amount.",
             )
 
-    st.markdown("#### Schedule 9 Donations")
-    don_col1, don_col2, don_col3 = st.columns(3)
-    donations_eligible_total = number_input(
-        "Schedule 9 Regular Donations",
-        "donations_eligible_total",
-        100.0,
-        "Use this to model Schedule 9 more closely. If left at 0, Charitable Donations above will be used.",
-    )
-    ecological_cultural_gifts = number_input(
-        "Ecological / Cultural Gifts",
-        "ecological_cultural_gifts",
-        100.0,
-    )
-    ecological_gifts_pre2016 = number_input(
-        "Pre-2016 Ecological Gifts Included Above",
-        "ecological_gifts_pre2016",
-        100.0,
-    )
+    with st.expander("Detailed Donation Worksheet Inputs (Less Common)", expanded=False):
+        st.caption("Open this only if you need Schedule 9 detail beyond the regular donation amount above.")
+        don_col1, don_col2, don_col3 = st.columns(3)
+        donations_eligible_total = number_input(
+            "Schedule 9 Regular Donations",
+            "donations_eligible_total",
+            100.0,
+            "Leave at 0 to use the Charitable Donations amount above.",
+        )
+        ecological_cultural_gifts = number_input(
+            "Ecological / Cultural Gifts",
+            "ecological_cultural_gifts",
+            100.0,
+        )
+        ecological_gifts_pre2016 = number_input(
+            "Pre-2016 Ecological Gifts Included Above",
+            "ecological_gifts_pre2016",
+            100.0,
+        )
 
     with st.expander("Carryforwards And Transfers", expanded=False):
-        st.caption("Open this only if you have tuition carryforwards, donation carryforwards, or extra provincial credit lines to bring forward.")
+        st.caption("Open this only if you are bringing forward older tuition, donation, or provincial credit amounts.")
         carryforward_tabs = st.tabs(["Tuition Carryforward", "Donation Carryforward", f"{province_name} Credit Lines"])
         with carryforward_tabs[0]:
             tuition_cf_df = render_record_card_editor(
@@ -4171,27 +4143,8 @@ with st.expander("4) Credits, Carryforwards, and Special Cases (Optional)", expa
                 ],
                 "Use this for province-specific credit lines not otherwise modelled. Amounts are added to provincial non-refundable credits.",
             )
-        tuition_cf_preview_df = coerce_editor_df(tuition_cf_df.copy(), ["tax_year", "available_amount", "claim_amount"])
-        donation_cf_preview_df = coerce_editor_df(donation_cf_df.copy(), ["tax_year", "available_amount", "claim_amount"])
-        provincial_credit_lines_preview_df = coerce_editor_df(provincial_credit_lines_df.copy(), ["line_code", "amount"])
-        tuition_carryforward_used_preview = min(
-            float(tuition_cf_preview_df["available_amount"].sum()),
-            float(tuition_cf_preview_df["claim_amount"].sum()),
-        )
-        render_metric_row(
-            [
-                ("Tuition Carryforward Used", tuition_carryforward_used_preview),
-                ("Donation Carryforward Used", min(float(donation_cf_preview_df["available_amount"].sum()), float(donation_cf_preview_df["claim_amount"].sum()))),
-                (f"{province_name} Extra Credit Lines", float(provincial_credit_lines_preview_df["amount"].sum())),
-            ],
-            3,
-        )
-
         st.markdown("#### Province Special Schedules")
-        st.caption(
-            "These fields map to province-specific schedules and special credits. Where the CRA form has a complex worksheet, "
-            "the app uses either a focused estimator or a final-credit input so the result still flows into refund or balance owing."
-        )
+        st.caption("Open this only if you need special province worksheet inputs that are not already covered above.")
         sp_col1, sp_col2, sp_col3 = st.columns(3)
     mb479_personal_tax_credit = 0.0
     mb479_homeowners_affordability_credit = 0.0
@@ -4834,9 +4787,6 @@ if "tax_result" in st.session_state:
             result=result,
             province_name=province_name,
             readiness_df=readiness_df,
-            quick_review_items=quick_review_items,
-            top_warning_items=top_warning_items,
-            top_override_items=top_override_items,
         )
         with st.expander("Client Review Details", expanded=False):
             st.markdown("#### Plain-Language Numbers")
