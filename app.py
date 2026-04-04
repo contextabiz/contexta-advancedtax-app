@@ -3110,7 +3110,7 @@ with st.container(border=True):
         - `Only have T-slips?` Start with `1A) Slips and Source Records`. For many users, that may be enough.
         - `Have income not already shown on slips?` Review `2) Income and Investment`.
         - `Have RRSP, FHSA, moving expenses, or other deductions?` Review `3) Deductions`.
-        - `Have donations, medical expenses, tuition carryforwards, dependants, or foreign tax situations?` Review `4) Credits, Carryforwards and Special Forms`.
+        - `Have donations, medical expenses, tuition carryforwards, dependants, or foreign tax situations?` Review `4) Credits, Carryforwards, and Special Cases`.
         - `Made instalments or other tax payments outside your slips?` Review `5) Payments and Withholdings`.
         """
     )
@@ -3525,6 +3525,7 @@ with st.expander("2) Income and Investment (Optional if not already covered by s
 
 with st.expander("3) Deductions (Optional)", expanded=False):
     st.caption("Use this section only if you have deductions that reduce income, such as RRSP or FHSA contributions, moving expenses, child care, support payments, or investment carrying charges. If you only have slips and no extra deductions, you can usually skip it.")
+    st.markdown("#### Registered Plans And Payroll Deductions")
     ded_col1, ded_col2, ded_col3 = st.columns(3)
     rrsp_deduction = number_input(
         "RRSP Deduction Claimed This Year (line 20800)",
@@ -3540,9 +3541,13 @@ with st.expander("3) Deductions (Optional)", expanded=False):
     )
     rpp_contribution = number_input("RPP Contribution", "rpp_contribution", 500.0)
     union_dues = number_input("Union / Professional Dues (line 22200)", "union_dues", 100.0)
+    st.markdown("#### Family, Work, And Moving Costs")
+    ded_col4, ded_col5, ded_col6 = st.columns(3)
     child_care_expenses = number_input("Child Care Expenses (line 22100)", "child_care_expenses", 100.0)
     moving_expenses = number_input("Moving Expenses (line 21900)", "moving_expenses", 100.0)
     support_payments_deduction = number_input("Deductible Support Payments (line 22000)", "support_payments_deduction", 100.0)
+    st.markdown("#### Investment, Employment, And Carryforwards")
+    ded_col7, ded_col8, ded_col9 = st.columns(3)
     carrying_charges = number_input(
         "Carrying Charges / Investment Interest",
         "carrying_charges",
@@ -3575,194 +3580,208 @@ with st.expander("3) Deductions (Optional)", expanded=False):
 rpp_contribution += float(t4_wizard_totals.get("box20_rpp", 0.0))
 union_dues += float(t4_wizard_totals.get("box44_union_dues", 0.0))
 
-with st.expander("4) Credits, Carryforwards and Special Forms (Optional / Situational)", expanded=False):
-    st.caption("Most users only need parts of this section. Open it if you have tuition, donations, medical expenses, dependants, foreign income or foreign tax, loss carryforwards, or province-specific credits.")
-    st.markdown("#### Household and Dependant Check")
-    st.caption("Use this interview to tell the app who lived with you, who you may be claiming, and whether another person is already claiming overlapping household amounts.")
-    household_tabs = st.tabs(["Your Household", "Dependant Details", "Claim Conflicts"])
-    with household_tabs[0]:
-        with st.container(border=True):
-            marital_col1, marital_col2 = st.columns(2)
-            spouse_claim_enabled = marital_col1.checkbox(
-                "Claim spouse / common-law partner amount",
-                value=bool(st.session_state.get("spouse_claim_enabled", False)),
-                key="spouse_claim_enabled",
-            )
-            has_spouse_end_of_year = marital_col1.checkbox(
-                "Had a spouse or common-law partner at year end",
-                value=bool(st.session_state.get("has_spouse_end_of_year", False)),
-                key="has_spouse_end_of_year",
-            )
-            separated_in_year = marital_col1.checkbox(
-                "Separated during the year",
-                value=bool(st.session_state.get("separated_in_year", False)),
-                key="separated_in_year",
-            )
-            support_payments_to_spouse = marital_col1.checkbox(
-                "Paid support to spouse / partner",
-                value=bool(st.session_state.get("support_payments_to_spouse", False)),
-                key="support_payments_to_spouse",
-            )
-            spouse_infirm = marital_col2.checkbox(
-                "Spouse / partner is infirm",
-                value=bool(st.session_state.get("spouse_infirm", False)),
-                key="spouse_infirm",
-            )
-            spouse_disability_transfer_available = marital_col2.checkbox(
-                "Spouse / partner has unused disability transfer",
-                value=bool(st.session_state.get("spouse_disability_transfer_available", False)),
-                key="spouse_disability_transfer_available",
-                help="Check if the spouse/common-law partner has an unused disability amount transfer available to claim.",
-            )
-            spouse_disability_transfer_available_amount = number_input(
-                "Unused spouse / partner disability transfer amount",
-                "spouse_disability_transfer_available_amount",
-                100.0,
-                "Optional. Enter the unused spouse disability transfer amount available before claiming it.",
-            )
-            spouse_net_income = number_input(
-                "Spouse / partner net income",
-                "spouse_net_income",
-                100.0,
-                "Used to estimate the spouse amount if you are claiming it.",
-            )
-    with household_tabs[1]:
-        with st.container(border=True):
-            dep_col1, dep_col2 = st.columns(2)
-            eligible_dependant_claim_enabled = dep_col1.checkbox(
-                "Claim an eligible dependant amount",
-                value=bool(st.session_state.get("eligible_dependant_claim_enabled", False)),
-                key="eligible_dependant_claim_enabled",
-            )
-            eligible_dependant_infirm = dep_col1.checkbox(
-                "Dependant is infirm",
-                value=bool(st.session_state.get("eligible_dependant_infirm", False)),
-                key="eligible_dependant_infirm",
-            )
-            dependant_lived_with_you = dep_col1.checkbox(
-                "Dependant lived with you",
-                value=bool(st.session_state.get("dependant_lived_with_you", False)),
-                key="dependant_lived_with_you",
-            )
-            eligible_dependant_net_income = number_input(
-                "Dependant net income",
-                "eligible_dependant_net_income",
-                100.0,
-                "Used to estimate the eligible dependant amount if you are claiming it.",
-            )
-            dependant_relationship = dep_col2.selectbox(
-                "Dependant relationship to you",
-                ["Child", "Parent/Grandparent", "Other relative", "Other"],
-                index=["Child", "Parent/Grandparent", "Other relative", "Other"].index(str(st.session_state.get("dependant_relationship", "Child")) if str(st.session_state.get("dependant_relationship", "Child")) in ["Child", "Parent/Grandparent", "Other relative", "Other"] else "Child"),
-                key="dependant_relationship",
-                help="Used in household-claim restriction checks.",
-            )
-            dependant_category = dep_col2.selectbox(
-                "Dependant type",
-                ["Minor child", "Adult child", "Parent/Grandparent", "Other adult relative", "Other"],
-                index=[
-                    "Minor child",
-                    "Adult child",
-                    "Parent/Grandparent",
-                    "Other adult relative",
-                    "Other",
-                ].index(
-                    str(st.session_state.get("dependant_category", "Minor child"))
-                    if str(st.session_state.get("dependant_category", "Minor child")) in [
+with st.expander("4) Credits, Carryforwards, and Special Cases (Optional)", expanded=False):
+    st.caption("Most users only need one or two parts of this section. Start with common credits, then open household, foreign tax, carryforwards, or province-specific areas only if they apply to you.")
+    st.markdown("#### Common Credits And Claim Amounts")
+    st.caption("Open this part if you have tuition, medical expenses, donations, student loan interest, or other common claim amounts.")
+    with st.expander("Household And Dependants", expanded=False):
+        st.caption("Open this only if spouse, dependant, caregiver, disability-transfer, or shared-claim rules apply to you.")
+        household_tabs = st.tabs(["Your Household", "Dependant Details", "Claim Conflicts"])
+        with household_tabs[0]:
+            with st.container(border=True):
+                marital_col1, marital_col2 = st.columns(2)
+                spouse_claim_enabled = marital_col1.checkbox(
+                    "Claim spouse / common-law partner amount",
+                    value=bool(st.session_state.get("spouse_claim_enabled", False)),
+                    key="spouse_claim_enabled",
+                )
+                has_spouse_end_of_year = marital_col1.checkbox(
+                    "Had a spouse or common-law partner at year end",
+                    value=bool(st.session_state.get("has_spouse_end_of_year", False)),
+                    key="has_spouse_end_of_year",
+                )
+                separated_in_year = marital_col1.checkbox(
+                    "Separated during the year",
+                    value=bool(st.session_state.get("separated_in_year", False)),
+                    key="separated_in_year",
+                )
+                support_payments_to_spouse = marital_col1.checkbox(
+                    "Paid support to spouse / partner",
+                    value=bool(st.session_state.get("support_payments_to_spouse", False)),
+                    key="support_payments_to_spouse",
+                )
+                spouse_infirm = marital_col2.checkbox(
+                    "Spouse / partner is infirm",
+                    value=bool(st.session_state.get("spouse_infirm", False)),
+                    key="spouse_infirm",
+                )
+                spouse_disability_transfer_available = marital_col2.checkbox(
+                    "Spouse / partner has unused disability transfer",
+                    value=bool(st.session_state.get("spouse_disability_transfer_available", False)),
+                    key="spouse_disability_transfer_available",
+                    help="Check if the spouse/common-law partner has an unused disability amount transfer available to claim.",
+                )
+                spouse_disability_transfer_available_amount = number_input(
+                    "Unused spouse / partner disability transfer amount",
+                    "spouse_disability_transfer_available_amount",
+                    100.0,
+                    "Optional. Enter the unused spouse disability transfer amount available before claiming it.",
+                )
+                spouse_net_income = number_input(
+                    "Spouse / partner net income",
+                    "spouse_net_income",
+                    100.0,
+                    "Used to estimate the spouse amount if you are claiming it.",
+                )
+        with household_tabs[1]:
+            with st.container(border=True):
+                dep_col1, dep_col2 = st.columns(2)
+                eligible_dependant_claim_enabled = dep_col1.checkbox(
+                    "Claim an eligible dependant amount",
+                    value=bool(st.session_state.get("eligible_dependant_claim_enabled", False)),
+                    key="eligible_dependant_claim_enabled",
+                )
+                eligible_dependant_infirm = dep_col1.checkbox(
+                    "Dependant is infirm",
+                    value=bool(st.session_state.get("eligible_dependant_infirm", False)),
+                    key="eligible_dependant_infirm",
+                )
+                dependant_lived_with_you = dep_col1.checkbox(
+                    "Dependant lived with you",
+                    value=bool(st.session_state.get("dependant_lived_with_you", False)),
+                    key="dependant_lived_with_you",
+                )
+                eligible_dependant_net_income = number_input(
+                    "Dependant net income",
+                    "eligible_dependant_net_income",
+                    100.0,
+                    "Used to estimate the eligible dependant amount if you are claiming it.",
+                )
+                dependant_relationship = dep_col2.selectbox(
+                    "Dependant relationship to you",
+                    ["Child", "Parent/Grandparent", "Other relative", "Other"],
+                    index=["Child", "Parent/Grandparent", "Other relative", "Other"].index(str(st.session_state.get("dependant_relationship", "Child")) if str(st.session_state.get("dependant_relationship", "Child")) in ["Child", "Parent/Grandparent", "Other relative", "Other"] else "Child"),
+                    key="dependant_relationship",
+                    help="Used in household-claim restriction checks.",
+                )
+                dependant_category = dep_col2.selectbox(
+                    "Dependant type",
+                    ["Minor child", "Adult child", "Parent/Grandparent", "Other adult relative", "Other"],
+                    index=[
                         "Minor child",
                         "Adult child",
                         "Parent/Grandparent",
                         "Other adult relative",
                         "Other",
-                    ]
-                    else "Minor child"
-                ),
-                key="dependant_category",
-                help="Used for finer household and transfer restriction checks.",
+                    ].index(
+                        str(st.session_state.get("dependant_category", "Minor child"))
+                        if str(st.session_state.get("dependant_category", "Minor child")) in [
+                            "Minor child",
+                            "Adult child",
+                            "Parent/Grandparent",
+                            "Other adult relative",
+                            "Other",
+                        ]
+                        else "Minor child"
+                    ),
+                    key="dependant_category",
+                    help="Used for finer household and transfer restriction checks.",
+                )
+                dependant_disability_transfer_available = dep_col2.checkbox(
+                    "Dependant has unused disability transfer",
+                    value=bool(st.session_state.get("dependant_disability_transfer_available", False)),
+                    key="dependant_disability_transfer_available",
+                    help="Check if the dependant has an unused disability amount transfer available.",
+                )
+                dependant_disability_transfer_available_amount = number_input(
+                    "Unused dependant disability transfer amount",
+                    "dependant_disability_transfer_available_amount",
+                    100.0,
+                    "Optional. Enter the unused dependant disability transfer amount available before claiming it.",
+                )
+        with household_tabs[2]:
+            with st.container(border=True):
+                restrict_col1, restrict_col2 = st.columns(2)
+                paid_child_support_for_dependant = restrict_col1.checkbox(
+                    "You paid child support for this dependant",
+                    value=bool(st.session_state.get("paid_child_support_for_dependant", False)),
+                    key="paid_child_support_for_dependant",
+                )
+                shared_custody_claim_agreement = restrict_col1.checkbox(
+                    "There is a shared-custody claim agreement",
+                    value=bool(st.session_state.get("shared_custody_claim_agreement", False)),
+                    key="shared_custody_claim_agreement",
+                )
+                another_household_member_claims_dependant = restrict_col1.checkbox(
+                    "Someone else in the household is claiming this dependant",
+                    value=bool(st.session_state.get("another_household_member_claims_dependant", False)),
+                    key="another_household_member_claims_dependant",
+                )
+                another_household_member_claims_caregiver = restrict_col2.checkbox(
+                    "Someone else is claiming the caregiver amount",
+                    value=bool(st.session_state.get("another_household_member_claims_caregiver", False)),
+                    key="another_household_member_claims_caregiver",
+                )
+                another_household_member_claims_disability_transfer = restrict_col2.checkbox(
+                    "Someone else is claiming the disability transfer",
+                    value=bool(st.session_state.get("another_household_member_claims_disability_transfer", False)),
+                    key="another_household_member_claims_disability_transfer",
+                )
+                medical_dependant_claim_shared = restrict_col2.checkbox(
+                    "Someone else is sharing or claiming this dependant's medical expenses",
+                    value=bool(st.session_state.get("medical_dependant_claim_shared", False)),
+                    key="medical_dependant_claim_shared",
+                )
+                caregiver_claim_target = restrict_col2.selectbox(
+                    "Caregiver claim should apply to",
+                    ["Auto", "Spouse", "Dependant"],
+                    index=["Auto", "Spouse", "Dependant"].index(
+                        str(st.session_state.get("caregiver_claim_target", "Auto"))
+                        if str(st.session_state.get("caregiver_claim_target", "Auto")) in ["Auto", "Spouse", "Dependant"]
+                        else "Auto"
+                    ),
+                    key="caregiver_claim_target",
+                    help="Use this when both spouse and dependant could qualify and you want to control which household member the caregiver claim is tied to.",
+                )
+                disability_transfer_source = restrict_col2.selectbox(
+                    "Disability transfer should come from",
+                    ["Auto", "Spouse", "Dependant"],
+                    index=["Auto", "Spouse", "Dependant"].index(
+                        str(st.session_state.get("disability_transfer_source", "Auto"))
+                        if str(st.session_state.get("disability_transfer_source", "Auto")) in ["Auto", "Spouse", "Dependant"]
+                        else "Auto"
+                    ),
+                    key="disability_transfer_source",
+                    help="Choose the source of the disability transfer when both spouse and dependant could qualify.",
+                )
+        with st.expander("Additional Dependants (Only If You Have More Than One)", expanded=False):
+            st.caption("Use this only if you have more than one dependant to review.")
+            additional_dependants_df = render_record_card_editor(
+                "Additional Dependants",
+                "additional_dependants",
+                [
+                    {"id": "dependant_label", "label": "Dependant name or label", "type": "text", "placeholder": "Dependant 2"},
+                    {"id": "category", "label": "Dependant type", "type": "select", "options": ["Minor child", "Adult child", "Parent/Grandparent", "Other adult relative", "Other"]},
+                    {"id": "infirm", "label": "Infirm", "type": "select", "options": ["No", "Yes"]},
+                    {"id": "lived_with_you", "label": "Lived with you", "type": "select", "options": ["No", "Yes"]},
+                    {"id": "caregiver_claim_amount", "label": "Caregiver claim amount", "step": 100.0},
+                    {"id": "disability_transfer_available_amount", "label": "Unused disability transfer amount", "step": 100.0},
+                    {"id": "medical_expenses_amount", "label": "Medical expenses for this dependant", "step": 100.0},
+                    {"id": "medical_claim_shared", "label": "Medical already shared or claimed by someone else", "type": "select", "options": ["No", "Yes"]},
+                ],
+                "Use this only if you have more than one dependant to review. These rows feed the caregiver, disability transfer, and dependant-medical pools.",
+                count_default=0,
             )
-            dependant_disability_transfer_available = dep_col2.checkbox(
-                "Dependant has unused disability transfer",
-                value=bool(st.session_state.get("dependant_disability_transfer_available", False)),
-                key="dependant_disability_transfer_available",
-                help="Check if the dependant has an unused disability amount transfer available.",
-            )
-            dependant_disability_transfer_available_amount = number_input(
-                "Unused dependant disability transfer amount",
-                "dependant_disability_transfer_available_amount",
-                100.0,
-                "Optional. Enter the unused dependant disability transfer amount available before claiming it.",
-            )
-    with household_tabs[2]:
-        with st.container(border=True):
-            restrict_col1, restrict_col2 = st.columns(2)
-            paid_child_support_for_dependant = restrict_col1.checkbox(
-                "You paid child support for this dependant",
-                value=bool(st.session_state.get("paid_child_support_for_dependant", False)),
-                key="paid_child_support_for_dependant",
-            )
-            shared_custody_claim_agreement = restrict_col1.checkbox(
-                "There is a shared-custody claim agreement",
-                value=bool(st.session_state.get("shared_custody_claim_agreement", False)),
-                key="shared_custody_claim_agreement",
-            )
-            another_household_member_claims_dependant = restrict_col1.checkbox(
-                "Someone else in the household is claiming this dependant",
-                value=bool(st.session_state.get("another_household_member_claims_dependant", False)),
-                key="another_household_member_claims_dependant",
-            )
-            another_household_member_claims_caregiver = restrict_col2.checkbox(
-                "Someone else is claiming the caregiver amount",
-                value=bool(st.session_state.get("another_household_member_claims_caregiver", False)),
-                key="another_household_member_claims_caregiver",
-            )
-            another_household_member_claims_disability_transfer = restrict_col2.checkbox(
-                "Someone else is claiming the disability transfer",
-                value=bool(st.session_state.get("another_household_member_claims_disability_transfer", False)),
-                key="another_household_member_claims_disability_transfer",
-            )
-            medical_dependant_claim_shared = restrict_col2.checkbox(
-                "Someone else is sharing or claiming this dependant's medical expenses",
-                value=bool(st.session_state.get("medical_dependant_claim_shared", False)),
-                key="medical_dependant_claim_shared",
-            )
-            caregiver_claim_target = restrict_col2.selectbox(
-                "Caregiver claim should apply to",
-                ["Auto", "Spouse", "Dependant"],
-                index=["Auto", "Spouse", "Dependant"].index(
-                    str(st.session_state.get("caregiver_claim_target", "Auto"))
-                    if str(st.session_state.get("caregiver_claim_target", "Auto")) in ["Auto", "Spouse", "Dependant"]
-                    else "Auto"
-                ),
-                key="caregiver_claim_target",
-                help="Use this when both spouse and dependant could qualify and you want to control which household member the caregiver claim is tied to.",
-            )
-            disability_transfer_source = restrict_col2.selectbox(
-                "Disability transfer should come from",
-                ["Auto", "Spouse", "Dependant"],
-                index=["Auto", "Spouse", "Dependant"].index(
-                    str(st.session_state.get("disability_transfer_source", "Auto"))
-                    if str(st.session_state.get("disability_transfer_source", "Auto")) in ["Auto", "Spouse", "Dependant"]
-                    else "Auto"
-                ),
-                key="disability_transfer_source",
-                help="Choose the source of the disability transfer when both spouse and dependant could qualify.",
-            )
-    additional_dependants_df = render_record_card_editor(
-        "Additional Dependants",
-        "additional_dependants",
-        [
-            {"id": "dependant_label", "label": "Dependant name or label", "type": "text", "placeholder": "Dependant 2"},
-            {"id": "category", "label": "Dependant type", "type": "select", "options": ["Minor child", "Adult child", "Parent/Grandparent", "Other adult relative", "Other"]},
-            {"id": "infirm", "label": "Infirm", "type": "select", "options": ["No", "Yes"]},
-            {"id": "lived_with_you", "label": "Lived with you", "type": "select", "options": ["No", "Yes"]},
-            {"id": "caregiver_claim_amount", "label": "Caregiver claim amount", "step": 100.0},
-            {"id": "disability_transfer_available_amount", "label": "Unused disability transfer amount", "step": 100.0},
-            {"id": "medical_expenses_amount", "label": "Medical expenses for this dependant", "step": 100.0},
-            {"id": "medical_claim_shared", "label": "Medical already shared or claimed by someone else", "type": "select", "options": ["No", "Yes"]},
-        ],
-        "Use this only if you have more than one dependant to review. These rows feed the caregiver, disability transfer, and dependant-medical pools.",
-        count_default=0,
-    )
+            if len(additional_dependants_df.index):
+                render_metric_row(
+                    [
+                        ("Additional Dependants", float(len(additional_dependants_df.index))),
+                        ("Additional Caregiver Pool", float(additional_dependants_df.loc[additional_dependants_df["infirm"].eq("Yes") & additional_dependants_df["category"].isin({"Adult child", "Parent/Grandparent", "Other adult relative"}), "caregiver_claim_amount"].sum()) if not additional_dependants_df.empty else 0.0),
+                        ("Additional Disability Transfer Pool", float(additional_dependants_df.loc[additional_dependants_df["infirm"].eq("Yes"), "disability_transfer_available_amount"].sum()) if not additional_dependants_df.empty else 0.0),
+                        ("Additional Medical Pool", float(additional_dependants_df.loc[additional_dependants_df["lived_with_you"].eq("Yes") & additional_dependants_df["medical_claim_shared"].eq("No"), "medical_expenses_amount"].sum()) if not additional_dependants_df.empty else 0.0),
+                    ],
+                    4,
+                )
     additional_dependant_count = len(additional_dependants_df.index)
     additional_dependant_caregiver_claim_total = 0.0
     additional_dependant_disability_transfer_available_total = 0.0
@@ -3798,45 +3817,29 @@ with st.expander("4) Credits, Carryforwards and Special Forms (Optional / Situat
             4,
         )
     spouse_amount_claim = number_input(
-        "Federal Spouse / Common-Law Claim Amount",
+        "Spouse / Common-Law Claim Amount",
         "spouse_amount_claim",
         100.0,
         "Enter the claim amount base, not the credit itself.",
     )
     eligible_dependant_claim = number_input(
-        "Federal Eligible Dependant Claim Amount",
+        "Eligible Dependant Claim Amount",
         "eligible_dependant_claim",
         100.0,
     )
-    disability_amount_claim = number_input(
-        "Federal Disability Amount Claim",
-        "disability_amount_claim",
-        100.0,
-    )
     age_amount_claim = number_input(
-        "Federal Age Amount Claim",
+        "Age Amount Claim",
         "age_amount_claim",
         100.0,
-        "Enter the federal age amount claim base if applicable.",
-    )
-    tuition_amount_claim = number_input(
-        "Current-Year Tuition Claim Override",
-        "tuition_amount_claim",
-        100.0,
-        "Leave at 0 to auto-claim the current-year T2202 tuition amount. Enter a lower or different amount only if you are following Schedule 11 manually.",
-    )
-    tuition_transfer_from_spouse = number_input(
-        "Federal Tuition Transfer From Spouse",
-        "tuition_transfer_from_spouse",
-        100.0,
+        "Enter the claim amount base if applicable.",
     )
     t2202_tuition_total = float(t2202_wizard_totals.get("box26_total_eligible_tuition", 0.0)) or float(t2202_wizard_totals.get("box23_session_tuition", 0.0))
     student_loan_interest = number_input("Student Loan Interest", "student_loan_interest", 50.0)
     medical_expenses_eligible = number_input(
-        "Manual Medical Claim Amount",
+        "Optional Manual Medical Claim Amount",
         "medical_expenses_eligible",
         100.0,
-        "Manual fallback. For 2025, the estimator now auto-calculates the claim from the medical expenses paid field below.",
+        "Optional manual amount. For 2025, the estimator auto-calculates the claim from the medical expenses paid field below.",
     )
     medical_expenses_paid = number_input(
         "Medical Expenses Paid",
@@ -3845,86 +3848,105 @@ with st.expander("4) Credits, Carryforwards and Special Forms (Optional / Situat
         "For 2025, the estimator automatically subtracts the CRA threshold and uses the remaining eligible amount.",
     )
     charitable_donations = number_input("Charitable Donations", "charitable_donations", 100.0)
-    additional_federal_credits = number_input(
-        "Additional Federal Non-Refundable Claim Amount",
-        "additional_federal_credits",
-        100.0,
-        "Enter additional federal claim amount bases from other CRA worksheets if needed.",
-    )
-    additional_provincial_credit_amount = number_input(
-        f"Additional {province_name} Non-Refundable Credit",
-        "additional_provincial_credit_amount",
-        100.0,
-        "Enter this as the final provincial credit amount in dollars.",
-    )
     refundable_credits = number_input(
         "Other Manual Refundable Credits",
         "refundable_credits",
         100.0,
         "Use this for refundable credits not otherwise listed below.",
     )
-    st.markdown("#### Refundable Credits Engine")
-    refundable_col1, refundable_col2 = st.columns(2)
-    canada_workers_benefit = refundable_col1.number_input(
-        "Canada Workers Benefit Manual Override",
-        min_value=0.0,
-        step=100.0,
-        value=float(st.session_state.get("canada_workers_benefit", 0.0)),
-        key="canada_workers_benefit",
-        help="Leave at 0 to use the app's estimate. Enter your own amount only if you are following the worksheet manually.",
-    )
-    cwb_disability_supplement_eligible = refundable_col1.checkbox(
-        "Eligible for CWB Disability Supplement",
-        value=bool(st.session_state.get("cwb_disability_supplement_eligible", False)),
-        key="cwb_disability_supplement_eligible",
-        help="Check this if the taxpayer is eligible for the disability tax credit and you want the app to include the CWB disability supplement in the 2025 auto estimate.",
-    )
-    spouse_cwb_disability_supplement_eligible = False
-    if has_spouse_end_of_year:
-        spouse_cwb_disability_supplement_eligible = refundable_col1.checkbox(
-            "Spouse Also Eligible for CWB Disability Supplement",
-            value=bool(st.session_state.get("spouse_cwb_disability_supplement_eligible", False)),
-            key="spouse_cwb_disability_supplement_eligible",
-            help="Used only for the family-income phaseout path in the app's 2025 disability-supplement estimate.",
+    with st.expander("Less Common Claim Amounts", expanded=False):
+        st.caption("Open this only if you are entering a less common claim amount or an optional manual amount.")
+        disability_amount_claim = number_input(
+            "Disability Amount Claim",
+            "disability_amount_claim",
+            100.0,
         )
-    canada_training_credit_limit_available = refundable_col1.number_input(
-        "Canada Training Credit Limit Available",
-        min_value=0.0,
-        step=100.0,
-        value=float(st.session_state.get("canada_training_credit_limit_available", 0.0)),
-        key="canada_training_credit_limit_available",
-        help="Used for automatic Canada Training Credit estimation against current-year tuition/training claims.",
-    )
-    canada_training_credit = refundable_col1.number_input(
-        "Canada Training Credit Manual Override",
-        min_value=0.0,
-        step=100.0,
-        value=float(st.session_state.get("canada_training_credit", 0.0)),
-        key="canada_training_credit",
-        help="Leave at 0 to use the app's estimate from the training credit limit and current-year tuition claim.",
-    )
-    medical_expense_supplement = refundable_col1.number_input(
-        "Medical Expense Supplement Manual Override",
-        min_value=0.0,
-        step=100.0,
-        value=float(st.session_state.get("medical_expense_supplement", 0.0)),
-        key="medical_expense_supplement",
-        help="Leave at 0 to use the app's estimate from employment income, net income, and the medical claim.",
-    )
-    other_federal_refundable_credits = refundable_col2.number_input(
-        "Other Federal Refundable Credits",
-        min_value=0.0,
-        step=100.0,
-        value=float(st.session_state.get("other_federal_refundable_credits", 0.0)),
-        key="other_federal_refundable_credits",
-    )
-    manual_provincial_refundable_credits = refundable_col2.number_input(
-        f"Other {province_name} Refundable Credits",
-        min_value=0.0,
-        step=100.0,
-        value=float(st.session_state.get("manual_provincial_refundable_credits", 0.0)),
-        key="manual_provincial_refundable_credits",
-    )
+        tuition_amount_claim = number_input(
+            "Optional Tuition Manual Amount",
+            "tuition_amount_claim",
+            100.0,
+            "Leave at 0 to use the app's automatic current-year tuition amount. Enter a different amount only if you are following Schedule 11 manually.",
+        )
+        tuition_transfer_from_spouse = number_input(
+            "Tuition Transfer From Spouse",
+            "tuition_transfer_from_spouse",
+            100.0,
+        )
+        additional_federal_credits = number_input(
+            "Other Federal Non-Refundable Claim Amount",
+            "additional_federal_credits",
+            100.0,
+            "Enter other federal claim amount bases from CRA worksheets only if needed.",
+        )
+        additional_provincial_credit_amount = number_input(
+            f"Other {province_name} Non-Refundable Credit",
+            "additional_provincial_credit_amount",
+            100.0,
+            "Enter this as the final provincial credit amount in dollars.",
+        )
+    with st.expander("Refundable Credit Manual Amounts (Advanced)", expanded=False):
+        st.caption("Open this only if you are entering a manual amount instead of the app's auto estimate.")
+        refundable_col1, refundable_col2 = st.columns(2)
+        canada_workers_benefit = refundable_col1.number_input(
+            "Canada Workers Benefit Manual Amount",
+            min_value=0.0,
+            step=100.0,
+            value=float(st.session_state.get("canada_workers_benefit", 0.0)),
+            key="canada_workers_benefit",
+            help="Leave at 0 to use the app's estimate. Enter your own amount only if you are following the worksheet manually.",
+        )
+        cwb_disability_supplement_eligible = refundable_col1.checkbox(
+            "Eligible for CWB Disability Supplement",
+            value=bool(st.session_state.get("cwb_disability_supplement_eligible", False)),
+            key="cwb_disability_supplement_eligible",
+            help="Check this if the taxpayer is eligible for the disability tax credit and you want the app to include the CWB disability supplement in the 2025 auto estimate.",
+        )
+        spouse_cwb_disability_supplement_eligible = False
+        if has_spouse_end_of_year:
+            spouse_cwb_disability_supplement_eligible = refundable_col1.checkbox(
+                "Spouse Also Eligible for CWB Disability Supplement",
+                value=bool(st.session_state.get("spouse_cwb_disability_supplement_eligible", False)),
+                key="spouse_cwb_disability_supplement_eligible",
+                help="Used only for the family-income phaseout path in the app's 2025 disability-supplement estimate.",
+            )
+        canada_training_credit_limit_available = refundable_col1.number_input(
+            "Canada Training Credit Limit Available",
+            min_value=0.0,
+            step=100.0,
+            value=float(st.session_state.get("canada_training_credit_limit_available", 0.0)),
+            key="canada_training_credit_limit_available",
+            help="Used for automatic Canada Training Credit estimation against current-year tuition/training claims.",
+        )
+        canada_training_credit = refundable_col1.number_input(
+            "Canada Training Credit Manual Amount",
+            min_value=0.0,
+            step=100.0,
+            value=float(st.session_state.get("canada_training_credit", 0.0)),
+            key="canada_training_credit",
+            help="Leave at 0 to use the app's estimate from the training credit limit and current-year tuition claim.",
+        )
+        medical_expense_supplement = refundable_col1.number_input(
+            "Medical Expense Supplement Manual Amount",
+            min_value=0.0,
+            step=100.0,
+            value=float(st.session_state.get("medical_expense_supplement", 0.0)),
+            key="medical_expense_supplement",
+            help="Leave at 0 to use the app's estimate from employment income, net income, and the medical claim.",
+        )
+        other_federal_refundable_credits = refundable_col2.number_input(
+            "Other Federal Refundable Credits",
+            min_value=0.0,
+            step=100.0,
+            value=float(st.session_state.get("other_federal_refundable_credits", 0.0)),
+            key="other_federal_refundable_credits",
+        )
+        manual_provincial_refundable_credits = refundable_col2.number_input(
+            f"Other {province_name} Refundable Credits",
+            min_value=0.0,
+            step=100.0,
+            value=float(st.session_state.get("manual_provincial_refundable_credits", 0.0)),
+            key="manual_provincial_refundable_credits",
+        )
     refundable_credits_engine_total = (
         canada_workers_benefit
         + canada_training_credit
@@ -3935,150 +3957,165 @@ with st.expander("4) Credits, Carryforwards and Special Forms (Optional / Situat
     )
     render_metric_row(
         [
-            ("CWB Manual Override", canada_workers_benefit),
+            ("CWB Manual Amount", canada_workers_benefit),
             ("CWB Disability Eligible", float(cwb_disability_supplement_eligible)),
             ("Training Credit Limit", canada_training_credit_limit_available),
-            ("Medical Supplement Override", medical_expense_supplement),
+            ("Medical Supplement Manual Amount", medical_expense_supplement),
         ],
         4,
     )
-    st.caption("Automatic refundable estimates currently include Canada Workers Benefit, Canada Training Credit, Medical Expense Supplement, and CPP/EI overpayment refunds. These are added on top of any built-in province-specific refundable schedules such as MB479, NS479, NB(S12), or NL479.")
-    st.markdown("#### Province-Specific Extra Credits")
-    st.caption(
-        "This section now carries province-aware inputs for caregiver and dependant-child style claims. "
-        "Ontario still has the deepest built-in worksheet support, but other provinces now have more direct hooks too."
-    )
-    on_col1, on_col2, on_col3 = st.columns(3)
-    ontario_caregiver_amount = on_col1.number_input(
-        f"{province_name} Caregiver Claim Amount",
-        min_value=0.0,
-        step=100.0,
-        value=float(st.session_state.get("provincial_caregiver_claim_amount", 0.0)),
-        key="provincial_caregiver_claim_amount",
-        help=PROVINCIAL_CAREGIVER_HELP.get(province, f"Enter the {province_name} caregiver or infirm dependant claim amount base if applicable."),
-    )
-    ontario_student_loan_interest = on_col1.number_input(
-        "Ontario Student Loan Interest",
-        min_value=0.0,
-        step=50.0,
-        value=float(st.session_state.get("ontario_student_loan_interest", 0.0)),
-        key="ontario_student_loan_interest",
-    )
-    ontario_tuition_transfer = on_col1.number_input(
-        "Ontario Tuition Transfer",
-        min_value=0.0,
-        step=100.0,
-        value=float(st.session_state.get("ontario_tuition_transfer", 0.0)),
-        key="ontario_tuition_transfer",
-    )
-    ontario_disability_transfer = on_col2.number_input(
-        "Ontario Disability Transfer",
-        min_value=0.0,
-        step=100.0,
-        value=float(st.session_state.get("ontario_disability_transfer", 0.0)),
-        key="ontario_disability_transfer",
-    )
-    ontario_adoption_expenses = on_col2.number_input(
-        "Ontario Adoption Expenses",
-        min_value=0.0,
-        step=100.0,
-        value=float(st.session_state.get("ontario_adoption_expenses", 0.0)),
-        key="ontario_adoption_expenses",
-    )
-    ontario_medical_dependants = on_col2.number_input(
-        "Ontario Medical for Other Dependants",
-        min_value=0.0,
-        step=100.0,
-        value=float(st.session_state.get("ontario_medical_dependants", 0.0)),
-        key="ontario_medical_dependants",
-        help="Enter medical expenses for other dependants. The Ontario limit is applied automatically for 2025.",
-    )
-    ontario_dependent_children_count = int(
-        on_col3.number_input(
-            f"{province_name} Dependent Children Count",
-            min_value=0,
-            step=1,
-            value=int(st.session_state.get("provincial_dependent_children_count", 0)),
-            key="provincial_dependent_children_count",
-            help="Used for Ontario tax reduction and for other province child-based reductions where built in.",
+    st.caption("Automatic refundable estimates currently include Canada Workers Benefit, Canada Training Credit, Medical Expense Supplement, and CPP/EI overpayment refunds.")
+    with st.expander("Province-Specific Credits And Schedules", expanded=False):
+        st.caption("Open this only if you are adding province-specific claim amounts or special schedule inputs.")
+        on_col1, on_col2, on_col3 = st.columns(3)
+        ontario_caregiver_amount = on_col1.number_input(
+            f"{province_name} Caregiver Claim Amount",
+            min_value=0.0,
+            step=100.0,
+            value=float(st.session_state.get("provincial_caregiver_claim_amount", 0.0)),
+            key="provincial_caregiver_claim_amount",
+            help=PROVINCIAL_CAREGIVER_HELP.get(province, f"Enter the {province_name} caregiver or infirm dependant claim amount base if applicable."),
         )
-    )
-    ontario_dependant_impairment_count = int(
-        on_col3.number_input(
-            "Ontario Impairment Dependants Count",
-            min_value=0,
-            step=1,
-            value=int(st.session_state.get("ontario_dependant_impairment_count", 0)),
-            key="ontario_dependant_impairment_count",
-            help="Additional Ontario tax reduction for qualifying dependants with an impairment.",
+        ontario_student_loan_interest = on_col1.number_input(
+            "Ontario Student Loan Interest",
+            min_value=0.0,
+            step=50.0,
+            value=float(st.session_state.get("ontario_student_loan_interest", 0.0)),
+            key="ontario_student_loan_interest",
         )
-    )
+        ontario_tuition_transfer = on_col1.number_input(
+            "Ontario Tuition Transfer",
+            min_value=0.0,
+            step=100.0,
+            value=float(st.session_state.get("ontario_tuition_transfer", 0.0)),
+            key="ontario_tuition_transfer",
+        )
+        ontario_disability_transfer = on_col2.number_input(
+            "Ontario Disability Transfer",
+            min_value=0.0,
+            step=100.0,
+            value=float(st.session_state.get("ontario_disability_transfer", 0.0)),
+            key="ontario_disability_transfer",
+        )
+        ontario_adoption_expenses = on_col2.number_input(
+            "Ontario Adoption Expenses",
+            min_value=0.0,
+            step=100.0,
+            value=float(st.session_state.get("ontario_adoption_expenses", 0.0)),
+            key="ontario_adoption_expenses",
+        )
+        ontario_medical_dependants = on_col2.number_input(
+            "Ontario Medical for Other Dependants",
+            min_value=0.0,
+            step=100.0,
+            value=float(st.session_state.get("ontario_medical_dependants", 0.0)),
+            key="ontario_medical_dependants",
+            help="Enter medical expenses for other dependants. The Ontario limit is applied automatically for 2025.",
+        )
+        ontario_dependent_children_count = int(
+            on_col3.number_input(
+                f"{province_name} Dependent Children Count",
+                min_value=0,
+                step=1,
+                value=int(st.session_state.get("provincial_dependent_children_count", 0)),
+                key="provincial_dependent_children_count",
+                help="Used for Ontario tax reduction and for other province child-based reductions where built in.",
+            )
+        )
+        ontario_dependant_impairment_count = int(
+            on_col3.number_input(
+                "Ontario Impairment Dependants Count",
+                min_value=0,
+                step=1,
+                value=int(st.session_state.get("ontario_dependant_impairment_count", 0)),
+                key="ontario_dependant_impairment_count",
+                help="Additional Ontario tax reduction for qualifying dependants with an impairment.",
+            )
+        )
 
-    st.markdown("#### Foreign and Dividend Credits")
-    fd_col1, fd_col2, fd_col3 = st.columns(3)
-    foreign_income = number_input(
-        "Manual Additional Foreign Income Not Already On Slips",
-        "foreign_income",
-        100.0,
-        "Use this only for extra foreign non-business income not already captured by T5, T3, or T4PS slips. Do not repeat slip amounts here.",
-    )
-    foreign_tax_paid = number_input(
-        "Manual Additional Foreign Tax Paid Not Already On Slips",
-        "foreign_tax_paid",
-        100.0,
-        "Use this only for extra foreign tax paid not already captured by T5 or T3 slips. Do not repeat slip amounts here.",
-    )
-    ontario_dividend_tax_credit_manual = number_input(
-        f"{province_name} Dividend Tax Credit Override",
-        "provincial_dividend_tax_credit_manual",
-        50.0,
-        f"Leave at 0 to use the auto-calculated {province_name} dividend tax credit where supported. Enter a higher amount only if your worksheet shows a different result.",
-    )
-    foreign_income += (
-        float(t5_wizard_totals.get("box15_foreign_income", 0.0))
-        + float(t3_wizard_totals.get("box25_foreign_income", 0.0))
-        + float(t4ps_wizard_totals.get("box37_foreign_non_business_income", 0.0))
-    )
-    foreign_tax_paid += (
-        float(t5_wizard_totals.get("box16_foreign_tax_paid", 0.0))
-        + float(t3_wizard_totals.get("box34_foreign_tax_paid", 0.0))
-    )
-    st.caption(
-        "Slip amounts from T5, T3, and T4PS are already added automatically. Only use the manual foreign-income and foreign-tax fields above for extra amounts that are missing from slips."
-    )
+    with st.expander("Foreign Tax And Dividend Credits", expanded=False):
+        st.caption("Open this only if you have extra foreign income, extra foreign tax paid, or are checking dividend-credit differences.")
+        fd_col1, fd_col2 = st.columns(2)
+        foreign_income = fd_col1.number_input(
+            "Manual Additional Foreign Income Not Already On Slips",
+            min_value=0.0,
+            step=100.0,
+            value=float(st.session_state.get("foreign_income", 0.0)),
+            key="foreign_income",
+            help="Use this only for extra foreign non-business income not already captured by T5, T3, or T4PS slips. Do not repeat slip amounts here.",
+        )
+        foreign_tax_paid = fd_col1.number_input(
+            "Manual Additional Foreign Tax Paid Not Already On Slips",
+            min_value=0.0,
+            step=100.0,
+            value=float(st.session_state.get("foreign_tax_paid", 0.0)),
+            key="foreign_tax_paid",
+            help="Use this only for extra foreign tax paid not already captured by T5 or T3 slips. Do not repeat slip amounts here.",
+        )
+        ontario_dividend_tax_credit_manual = fd_col2.number_input(
+            f"{province_name} Dividend Tax Credit Manual Amount",
+            min_value=0.0,
+            step=50.0,
+            value=float(st.session_state.get("provincial_dividend_tax_credit_manual", 0.0)),
+            key="provincial_dividend_tax_credit_manual",
+            help=f"Leave at 0 to use the auto-calculated {province_name} dividend tax credit where supported. Enter a higher amount only if your worksheet shows a different result.",
+        )
+        foreign_income += (
+            float(t5_wizard_totals.get("box15_foreign_income", 0.0))
+            + float(t3_wizard_totals.get("box25_foreign_income", 0.0))
+            + float(t4ps_wizard_totals.get("box37_foreign_non_business_income", 0.0))
+        )
+        foreign_tax_paid += (
+            float(t5_wizard_totals.get("box16_foreign_tax_paid", 0.0))
+            + float(t3_wizard_totals.get("box34_foreign_tax_paid", 0.0))
+        )
+        st.caption(
+            "Slip amounts from T5, T3, and T4PS are already added automatically. Only use the manual foreign-income and foreign-tax fields above for extra amounts that are missing from slips."
+        )
 
-    st.markdown("#### T2209 / T2036 Worksheet")
-    ftc_col1, ftc_col2, ftc_col3 = st.columns(3)
-    t2209_non_business_tax_paid = number_input(
-        "T2209 Line 1 Non-Business Tax Paid Override",
-        "t2209_non_business_tax_paid",
-        100.0,
-        "Optional. Leave this at 0 unless you are working from the T2209 form and want to override the foreign-tax total used by the app.",
-    )
-    t2209_net_foreign_non_business_income = number_input(
-        "T2209 Line 2 Net Foreign Non-Business Income Override",
-        "t2209_net_foreign_non_business_income",
-        100.0,
-        "Optional. Leave this at 0 unless you are following T2209 directly and want to override the foreign-income amount used by the app.",
-    )
-    t2209_net_income_override = number_input(
-        "T2209 Net Income Override",
-        "t2209_net_income_override",
-        100.0,
-        "Advanced override. Leave at 0 unless you are checking the T2209 worksheet line by line.",
-    )
-    t2209_basic_federal_tax_override = number_input(
-        "T2209 Basic Federal Tax Override",
-        "t2209_basic_federal_tax_override",
-        100.0,
-        "Advanced override. Leave at 0 unless your own T2209 worksheet uses a different federal tax amount.",
-    )
-    t2036_provincial_tax_otherwise_payable_override = number_input(
-        "T2036 Provincial Tax Otherwise Payable Override",
-        "t2036_provincial_tax_otherwise_payable_override",
-        100.0,
-        "Optional override for the T2036 provincial tax otherwise payable amount.",
-    )
+        with st.expander("Advanced Foreign Tax Manual Amounts", expanded=False):
+            st.caption("Leave all manual amounts at 0 unless you are checking the T2209 or T2036 worksheet manually.")
+            ftc_col1, ftc_col2, ftc_col3 = st.columns(3)
+            t2209_non_business_tax_paid = ftc_col1.number_input(
+                "T2209 Line 1 Non-Business Tax Paid Manual Amount",
+                min_value=0.0,
+                step=100.0,
+                value=float(st.session_state.get("t2209_non_business_tax_paid", 0.0)),
+                key="t2209_non_business_tax_paid",
+                help="Optional. Leave this at 0 unless you are working from the T2209 form and want to override the foreign-tax total used by the app.",
+            )
+            t2209_net_foreign_non_business_income = ftc_col1.number_input(
+                "T2209 Line 2 Net Foreign Non-Business Income Manual Amount",
+                min_value=0.0,
+                step=100.0,
+                value=float(st.session_state.get("t2209_net_foreign_non_business_income", 0.0)),
+                key="t2209_net_foreign_non_business_income",
+                help="Optional. Leave this at 0 unless you are following T2209 directly and want to override the foreign-income amount used by the app.",
+            )
+            t2209_net_income_override = ftc_col2.number_input(
+                "T2209 Net Income Manual Amount",
+                min_value=0.0,
+                step=100.0,
+                value=float(st.session_state.get("t2209_net_income_override", 0.0)),
+                key="t2209_net_income_override",
+                help="Advanced override. Leave at 0 unless you are checking the T2209 worksheet line by line.",
+            )
+            t2209_basic_federal_tax_override = ftc_col2.number_input(
+                "T2209 Basic Federal Tax Manual Amount",
+                min_value=0.0,
+                step=100.0,
+                value=float(st.session_state.get("t2209_basic_federal_tax_override", 0.0)),
+                key="t2209_basic_federal_tax_override",
+                help="Advanced override. Leave at 0 unless your own T2209 worksheet uses a different federal tax amount.",
+            )
+            t2036_provincial_tax_otherwise_payable_override = ftc_col3.number_input(
+                "T2036 Provincial Tax Otherwise Payable Manual Amount",
+                min_value=0.0,
+                step=100.0,
+                value=float(st.session_state.get("t2036_provincial_tax_otherwise_payable_override", 0.0)),
+                key="t2036_provincial_tax_otherwise_payable_override",
+                help="Optional override for the T2036 provincial tax otherwise payable amount.",
+            )
 
     st.markdown("#### Schedule 9 Donations")
     don_col1, don_col2, don_col3 = st.columns(3)
@@ -4099,62 +4136,63 @@ with st.expander("4) Credits, Carryforwards and Special Forms (Optional / Situat
         100.0,
     )
 
-    st.markdown("#### Carryforwards and Transfers")
-    carryforward_tabs = st.tabs(["Tuition Carryforward", "Donation Carryforward", f"{province_name} Credit Lines"])
-    with carryforward_tabs[0]:
-        tuition_cf_df = render_record_card_editor(
-            "Tuition Carryforward by Year",
-            "tuition_carryforwards",
-            [
-                {"id": "tax_year", "label": "Tax Year", "step": 1.0},
-                {"id": "available_amount", "label": "Available Amount", "step": 100.0},
-                {"id": "claim_amount", "label": "Claim Amount", "step": 100.0},
-            ],
-            "Enter one row per carryforward year. Requested claims are capped to the available amount and flow into the Schedule 11 worksheet.",
+    with st.expander("Carryforwards And Transfers", expanded=False):
+        st.caption("Open this only if you have tuition carryforwards, donation carryforwards, or extra provincial credit lines to bring forward.")
+        carryforward_tabs = st.tabs(["Tuition Carryforward", "Donation Carryforward", f"{province_name} Credit Lines"])
+        with carryforward_tabs[0]:
+            tuition_cf_df = render_record_card_editor(
+                "Tuition Carryforward by Year",
+                "tuition_carryforwards",
+                [
+                    {"id": "tax_year", "label": "Tax Year", "step": 1.0},
+                    {"id": "available_amount", "label": "Available Amount", "step": 100.0},
+                    {"id": "claim_amount", "label": "Claim Amount", "step": 100.0},
+                ],
+                "Enter one row per carryforward year. Requested claims are capped to the available amount and flow into the Schedule 11 worksheet.",
+            )
+        with carryforward_tabs[1]:
+            donation_cf_df = render_record_card_editor(
+                "Donation Carryforward by Year",
+                "donation_carryforwards",
+                [
+                    {"id": "tax_year", "label": "Tax Year", "step": 1.0},
+                    {"id": "available_amount", "label": "Available Amount", "step": 100.0},
+                    {"id": "claim_amount", "label": "Claim Amount", "step": 100.0},
+                ],
+                "Enter one row per donation carryforward year. Claim amounts are added to Schedule 9 regular donations.",
+            )
+        with carryforward_tabs[2]:
+            provincial_credit_lines_df = render_record_card_editor(
+                f"{province_name} Additional Credit Lines",
+                "provincial_credit_lines",
+                [
+                    {"id": "line_code", "label": "Line Code", "step": 1.0},
+                    {"id": "amount", "label": "Amount", "step": 100.0},
+                ],
+                "Use this for province-specific credit lines not otherwise modelled. Amounts are added to provincial non-refundable credits.",
+            )
+        tuition_cf_preview_df = coerce_editor_df(tuition_cf_df.copy(), ["tax_year", "available_amount", "claim_amount"])
+        donation_cf_preview_df = coerce_editor_df(donation_cf_df.copy(), ["tax_year", "available_amount", "claim_amount"])
+        provincial_credit_lines_preview_df = coerce_editor_df(provincial_credit_lines_df.copy(), ["line_code", "amount"])
+        tuition_carryforward_used_preview = min(
+            float(tuition_cf_preview_df["available_amount"].sum()),
+            float(tuition_cf_preview_df["claim_amount"].sum()),
         )
-    with carryforward_tabs[1]:
-        donation_cf_df = render_record_card_editor(
-            "Donation Carryforward by Year",
-            "donation_carryforwards",
+        render_metric_row(
             [
-                {"id": "tax_year", "label": "Tax Year", "step": 1.0},
-                {"id": "available_amount", "label": "Available Amount", "step": 100.0},
-                {"id": "claim_amount", "label": "Claim Amount", "step": 100.0},
+                ("Tuition Carryforward Used", tuition_carryforward_used_preview),
+                ("Donation Carryforward Used", min(float(donation_cf_preview_df["available_amount"].sum()), float(donation_cf_preview_df["claim_amount"].sum()))),
+                (f"{province_name} Extra Credit Lines", float(provincial_credit_lines_preview_df["amount"].sum())),
             ],
-            "Enter one row per donation carryforward year. Claim amounts are added to Schedule 9 regular donations.",
+            3,
         )
-    with carryforward_tabs[2]:
-        provincial_credit_lines_df = render_record_card_editor(
-            f"{province_name} Additional Credit Lines",
-            "provincial_credit_lines",
-            [
-                {"id": "line_code", "label": "Line Code", "step": 1.0},
-                {"id": "amount", "label": "Amount", "step": 100.0},
-            ],
-            "Use this for province-specific credit lines not otherwise modelled. Amounts are added to provincial non-refundable credits.",
-        )
-    tuition_cf_preview_df = coerce_editor_df(tuition_cf_df.copy(), ["tax_year", "available_amount", "claim_amount"])
-    donation_cf_preview_df = coerce_editor_df(donation_cf_df.copy(), ["tax_year", "available_amount", "claim_amount"])
-    provincial_credit_lines_preview_df = coerce_editor_df(provincial_credit_lines_df.copy(), ["line_code", "amount"])
-    tuition_carryforward_used_preview = min(
-        float(tuition_cf_preview_df["available_amount"].sum()),
-        float(tuition_cf_preview_df["claim_amount"].sum()),
-    )
-    render_metric_row(
-        [
-            ("Tuition Carryforward Used", tuition_carryforward_used_preview),
-            ("Donation Carryforward Used", min(float(donation_cf_preview_df["available_amount"].sum()), float(donation_cf_preview_df["claim_amount"].sum()))),
-            (f"{province_name} Extra Credit Lines", float(provincial_credit_lines_preview_df["amount"].sum())),
-        ],
-        3,
-    )
 
-    st.markdown("#### Province Special Schedules")
-    st.caption(
-        "These fields map to province-specific schedules and special credits. Where the CRA form has a complex worksheet, "
-        "the app uses either a focused estimator or a final-credit input so the result still flows into refund or balance owing."
-    )
-    sp_col1, sp_col2, sp_col3 = st.columns(3)
+        st.markdown("#### Province Special Schedules")
+        st.caption(
+            "These fields map to province-specific schedules and special credits. Where the CRA form has a complex worksheet, "
+            "the app uses either a focused estimator or a final-credit input so the result still flows into refund or balance owing."
+        )
+        sp_col1, sp_col2, sp_col3 = st.columns(3)
     mb479_personal_tax_credit = 0.0
     mb479_homeowners_affordability_credit = 0.0
     mb479_renters_affordability_credit = 0.0
@@ -4741,7 +4779,7 @@ if "tax_result" in st.session_state:
 
     st.subheader("6) Results")
     provincial_form_code = PROVINCIAL_FORM_CODES.get(province, "428")
-    tab_names = ["Summary", "Detailed Return", "Input Checks", "Foreign Tax Credit", provincial_form_code, "Rental Details", "Capital Gains", "Tuition", "Donations", "Scope / Limits"]
+    tab_names = ["Summary", "Return Details", "Advanced Checks", "Foreign Tax Credit", provincial_form_code, "Rental Details", "Capital Gains", "Tuition", "Donations", "Scope / Limits"]
     special_tab_name = None
     if province == "MB":
         special_tab_name = "MB428-A / MB479"
@@ -4822,6 +4860,7 @@ if "tax_result" in st.session_state:
                 use_container_width=True,
             )
         st.caption("This tab is written in simpler language for sharing with a client, family member, or reviewer. The detailed worksheet tabs remain available if you want to trace the estimate line by line.")
+        st.caption("If you want a second review of slips, support, or filing readiness, reach out: info@contexta.biz")
 
     with return_tab:
         st.caption("This tab is the worksheet-style view. Start with the overview, then open the line-by-line sections only if you want to trace the return in more detail.")
