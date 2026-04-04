@@ -30,8 +30,8 @@ OG_DESCRIPTION = (
     "Estimate a more complete Canadian personal income tax return with broader CRA-style income, "
     "deduction, credit, and payment inputs."
 )
-APP_URL = "https://tax.contexta.biz/"
-OG_IMAGE_URL = "https://tax.contexta.biz/canadian-income-tax-estimator-og.jpg"
+APP_URL = "https://advtax.contexta.biz/"
+OG_IMAGE_URL = "https://advtax.contexta.biz/canadian-income-tax-estimator-og.jpg"
 PROVINCIAL_FORM_CODES = {
     "AB": "AB428",
     "BC": "BC428",
@@ -2695,7 +2695,7 @@ def build_special_schedule_df(result: dict, province_code: str) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-st.set_page_config(page_title=META_TITLE, page_icon="🧮", layout="wide")
+st.set_page_config(page_title=META_TITLE, page_icon="📱")
 inject_meta_tags()
 
 st.title("Advanced Canadian Personal Tax Estimator")
