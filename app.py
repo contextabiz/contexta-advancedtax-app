@@ -1701,6 +1701,158 @@ def render_answer_summary_sheet(
     st.caption(f"Filing snapshot: Ready {ready_count}, Review {review_count}, Missing {missing_count}.")
 
 
+def render_tax_newbie_benefits_screener(province: str, province_name: str) -> None:
+    with st.expander("New To Tax? Benefits And Deduction Screener", expanded=False):
+        st.caption("Answer a few quick questions to see which credits, deductions, or benefits might be worth checking. This is only a reminder tool and does not change the estimate by itself.")
+        screen_col1, screen_col2, screen_col3 = st.columns(3)
+        has_spouse_screen = screen_col1.checkbox(
+            "I have a spouse or common-law partner",
+            value=bool(st.session_state.get("screen_has_spouse", False)),
+            key="screen_has_spouse",
+        )
+        has_dependants_screen = screen_col1.checkbox(
+            "I support a child or other dependant",
+            value=bool(st.session_state.get("screen_has_dependants", False)),
+            key="screen_has_dependants",
+        )
+        paid_rent_or_property_tax_screen = screen_col1.checkbox(
+            "I paid rent or property tax",
+            value=bool(st.session_state.get("screen_paid_rent_or_property_tax", False)),
+            key="screen_paid_rent_or_property_tax",
+        )
+        paid_tuition_or_student_loan_screen = screen_col2.checkbox(
+            "I paid tuition or student loan interest",
+            value=bool(st.session_state.get("screen_paid_tuition_or_student_loan", False)),
+            key="screen_paid_tuition_or_student_loan",
+        )
+        had_medical_or_donations_screen = screen_col2.checkbox(
+            "I had medical expenses or donations",
+            value=bool(st.session_state.get("screen_had_medical_or_donations", False)),
+            key="screen_had_medical_or_donations",
+        )
+        had_work_or_moving_costs_screen = screen_col2.checkbox(
+            "I had work expenses, child care, or moving costs",
+            value=bool(st.session_state.get("screen_had_work_or_moving_costs", False)),
+            key="screen_had_work_or_moving_costs",
+        )
+        had_foreign_or_investment_income_screen = screen_col3.checkbox(
+            "I had foreign income or investment income",
+            value=bool(st.session_state.get("screen_had_foreign_or_investment_income", False)),
+            key="screen_had_foreign_or_investment_income",
+        )
+        low_income_screen = screen_col3.checkbox(
+            "My income is fairly low this year",
+            value=bool(st.session_state.get("screen_low_income", False)),
+            key="screen_low_income",
+        )
+        want_household_review_screen = screen_col3.checkbox(
+            "I am not sure which household credits I can claim",
+            value=bool(st.session_state.get("screen_want_household_review", False)),
+            key="screen_want_household_review",
+        )
+
+        def render_screening_list(title: str, items: list[dict[str, str]]) -> None:
+            if not items:
+                return
+            with st.container(border=True):
+                st.markdown(f"##### {title}")
+                st.markdown(
+                    "\n".join(
+                        (
+                            f"- `What to check:` {item['what']}  \n"
+                            f"  `Why this might matter:` {item['why']}  \n"
+                            f"  `Where to go:` {item['where']}"
+                        )
+                        for item in items
+                    )
+                )
+
+        likely_items: list[dict[str, str]] = []
+        maybe_items: list[dict[str, str]] = []
+        easy_to_miss_items: list[dict[str, str]] = []
+        if has_spouse_screen:
+            likely_items.append({
+                "what": "Check the spouse / common-law partner amount.",
+                "why": "This can reduce tax if your spouse or partner had low net income.",
+                "where": "`Section 4 -> Household And Dependants`",
+            })
+        if has_dependants_screen or want_household_review_screen:
+            likely_items.append({
+                "what": "Review eligible dependant, caregiver, disability transfer, and dependant medical rules.",
+                "why": "Household-related claims are easy to miss and can affect both federal and provincial credits.",
+                "where": "`Section 4 -> Household And Dependants`",
+            })
+        if paid_tuition_or_student_loan_screen:
+            likely_items.append({
+                "what": "Check tuition, student loan interest, and any tuition carryforward amounts.",
+                "why": "These amounts often create credits now or preserve carryforwards for later years.",
+                "where": "`Section 4 -> Common Credits And Claim Amounts` or `Section 4 -> Carryforwards And Transfers`",
+            })
+        if had_medical_or_donations_screen:
+            likely_items.append({
+                "what": "Check medical expenses and charitable donations.",
+                "why": "Even moderate amounts can create useful non-refundable credits.",
+                "where": "`Section 4 -> Common Credits And Claim Amounts`",
+            })
+        if had_work_or_moving_costs_screen:
+            likely_items.append({
+                "what": "Review RRSP, FHSA, moving expenses, child care, support payments, and work-related deductions.",
+                "why": "Deductions reduce income directly, which can also change other credits and benefits.",
+                "where": "`Section 3 -> Deductions`",
+            })
+        if had_foreign_or_investment_income_screen:
+            likely_items.append({
+                "what": "Review foreign income, dividends, investment income, and foreign tax inputs.",
+                "why": "Foreign income, dividends, and investment amounts are easy to misclassify or count twice.",
+                "where": "`Section 2 -> Income And Investment` and `Section 4 -> Foreign Tax And Dividend Credits`",
+            })
+        if low_income_screen:
+            maybe_items.append({
+                "what": "Check whether Canada Workers Benefit or Medical Expense Supplement may apply.",
+                "why": "Lower-income returns often qualify for refundable support that changes the final result.",
+                "where": "`Section 4 -> Refundable Credit Manual Amounts (Advanced)` and `Section 6 -> Summary`",
+            })
+            easy_to_miss_items.append({
+                "what": "Make sure you still file if GST/HST credit may matter to you.",
+                "why": "Some benefits are triggered by filing even when no tax is owing.",
+                "where": "`Outside This Estimator -> CRA benefit eligibility`",
+            })
+        if province == "ON" and paid_rent_or_property_tax_screen:
+            easy_to_miss_items.append({
+                "what": "Review Ontario Trillium Benefit separately if you paid rent or property tax.",
+                "why": "Housing-related Ontario benefits can matter even when the main tax return looks simple.",
+                "where": "`Outside This Estimator -> Ontario benefit eligibility`",
+            })
+        elif paid_rent_or_property_tax_screen:
+            maybe_items.append({
+                "what": "Check whether your housing costs affect province-specific benefits.",
+                "why": "Some provinces tie credits or benefits to housing costs, family status, or income level.",
+                "where": f"`Section 4 -> Province-Specific Credits And Schedules` and `Outside This Estimator -> {province_name} benefit guidance`",
+            })
+
+        if not likely_items and not maybe_items and not easy_to_miss_items:
+            maybe_items.append({
+                "what": "Check for deductions and common credits even if you already entered all your slips.",
+                "why": "Many first-time filers miss claimable items simply because they stop after entering slips.",
+                "where": "`Section 3 -> Deductions` and `Section 4 -> Common Credits And Claim Amounts`",
+            })
+
+        always_check = [
+            "If you only entered slips so far, it is still worth checking section 3 for deductions and section 4 for common credits.",
+            "If you made instalments or other payments outside slips, review `5) Payments and Withholdings`.",
+        ]
+
+        render_screening_list("Likely Worth Checking", likely_items)
+        render_screening_list("Maybe Relevant", maybe_items)
+        render_screening_list("Not Estimated Here But Easy To Miss", easy_to_miss_items)
+        if not likely_items and not maybe_items and not easy_to_miss_items:
+            st.info("Tick any boxes that sound like you, and the app will suggest what to check next.")
+
+        st.caption("Good default path for most first-time users: `1A) Slips and Source Records` -> `3) Deductions` -> `4) Credits, Carryforwards, and Special Cases` -> `Summary`.")
+        st.markdown("##### Good To Keep In Mind")
+        st.markdown("\n".join(f"- {item}" for item in always_check))
+
+
 def build_currency_df(rows: list[dict], currency_columns: list[str]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     for column in currency_columns:
@@ -3111,6 +3263,7 @@ with st.container(border=True):
         - `Made instalments or other tax payments outside your slips?` Review `5) Payments and Withholdings`.
         """
     )
+render_tax_newbie_benefits_screener(province, province_name)
 
 with st.expander("1A) Slips and Source Records", expanded=True):
     st.info(
