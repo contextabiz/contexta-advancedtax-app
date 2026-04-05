@@ -4,6 +4,7 @@ import pandas as pd
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
+from typing import Literal, TypedDict
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
@@ -1669,6 +1670,8 @@ def render_answer_summary_sheet(
     result: dict,
     province_name: str,
     readiness_df: pd.DataFrame,
+    next_best_action: "NextBestAction | None" = None,
+    completion_flags: "list[CompletionFlag] | None" = None,
 ) -> None:
     ready_count = int((readiness_df["Status"] == "Ready").sum()) if not readiness_df.empty else 0
     review_count = int((readiness_df["Status"] == "Review").sum()) if not readiness_df.empty else 0
@@ -1699,6 +1702,668 @@ def render_answer_summary_sheet(
         4,
     )
     st.caption(f"Filing snapshot: Ready {ready_count}, Review {review_count}, Missing {missing_count}.")
+    if next_best_action is not None:
+        with st.container(border=True):
+            st.markdown("##### Next Best Step")
+            st.markdown(
+                f"- [ ] {next_best_action['label']}  \n"
+                f"  `Why:` {next_best_action['reason']}  \n"
+                f"  `Where to go:` `{next_best_action['where']}`"
+            )
+    if completion_flags:
+        render_completion_flags_panel(
+            title="Still Worth Checking",
+            flags=completion_flags[:2],
+        )
+
+
+class ScreeningInputs(TypedDict):
+    has_spouse: bool
+    has_dependants: bool
+    paid_rent_or_property_tax: bool
+    paid_tuition: bool
+    paid_student_loan_interest: bool
+    had_medical_expenses: bool
+    made_donations: bool
+    had_moving_expenses: bool
+    had_child_care_expenses: bool
+    had_work_expenses: bool
+    had_foreign_income: bool
+    had_investment_income: bool
+    low_income_self_assessed: bool
+    wants_household_help: bool
+    province: str
+    province_name: str
+
+
+class GuidanceItem(TypedDict):
+    id: str
+    priority: Literal["likely", "maybe", "easy_to_miss"]
+    what: str
+    why: str
+    where: str
+    estimated_here: bool
+    confidence: Literal["low", "medium", "high"]
+
+
+class NextBestAction(TypedDict):
+    id: str
+    label: str
+    reason: str
+    where: str
+    priority: Literal["now", "soon", "optional"]
+
+
+class SectionProgress(TypedDict):
+    section_1_slips: Literal["not_started", "in_progress", "done", "not_applicable"]
+    section_2_income: Literal["not_started", "in_progress", "done", "not_applicable"]
+    section_3_deductions: Literal["not_started", "in_progress", "done", "not_applicable"]
+    section_4_credits: Literal["not_started", "in_progress", "done", "not_applicable"]
+    section_5_payments: Literal["not_started", "in_progress", "done", "not_applicable"]
+    household_reviewed: Literal["not_started", "in_progress", "done", "not_applicable"]
+    foreign_tax_reviewed: Literal["not_started", "in_progress", "done", "not_applicable"]
+    carryforward_reviewed: Literal["not_started", "in_progress", "done", "not_applicable"]
+    refundable_reviewed: Literal["not_started", "in_progress", "done", "not_applicable"]
+    summary_reviewed: Literal["not_started", "in_progress", "done", "not_applicable"]
+
+
+class CompletionFlag(TypedDict):
+    id: str
+    severity: Literal["info", "review", "important"]
+    message: str
+    where: str
+    related_guidance_id: str | None
+
+
+def render_completion_flags_panel(title: str, flags: list[CompletionFlag]) -> None:
+    if not flags:
+        return
+    severity_labels = {
+        "important": "Important",
+        "review": "Review",
+        "info": "Info",
+    }
+    with st.container(border=True):
+        st.markdown(f"##### {title}")
+        for flag in flags:
+            line = f"{severity_labels[flag['severity']]}: {flag['message']}  \n`Where to go:` `{flag['where']}`"
+            if flag["severity"] == "important":
+                st.error(line)
+            elif flag["severity"] == "review":
+                st.warning(line)
+            else:
+                st.info(line)
+
+
+def build_screening_inputs(
+    *,
+    province: str,
+    province_name: str,
+    session_state: dict,
+    wizard_totals: dict,
+    raw_inputs: dict,
+) -> ScreeningInputs:
+    def numeric_value(key: str) -> float:
+        return float(raw_inputs.get(key, session_state.get(key, 0.0)) or 0.0)
+
+    def bool_value(key: str) -> bool:
+        return bool(raw_inputs.get(key, session_state.get(key, False)))
+
+    def has_rows(key: str) -> bool:
+        value = session_state.get(key, [])
+        return bool(value)
+
+    inferred_has_spouse = bool_value("spouse_claim_enabled") or bool_value("has_spouse_end_of_year")
+    inferred_has_dependants = (
+        bool_value("eligible_dependant_claim_enabled")
+        or has_rows("additional_dependants")
+        or bool_value("dependant_lived_with_you")
+    )
+    inferred_paid_rent_or_property_tax = (
+        numeric_value("t776_property_taxes") > 0
+        or bool_value("bc_renters_credit_eligible")
+        or bool_value("screen_paid_rent_or_property_tax")
+    )
+    inferred_paid_tuition = (
+        numeric_value("tuition_amount_claim") > 0
+        or numeric_value("student_loan_interest") > 0
+        or has_rows("t2202_wizard")
+        or numeric_value("t2202_tuition_total") > 0
+    )
+    inferred_had_medical = numeric_value("medical_expenses_paid") > 0
+    inferred_donations = numeric_value("charitable_donations") > 0 or numeric_value("donations_eligible_total") > 0
+    inferred_moving = numeric_value("moving_expenses") > 0
+    inferred_child_care = numeric_value("child_care_expenses") > 0
+    inferred_work_expenses = (
+        numeric_value("other_employment_expenses") > 0
+        or numeric_value("rrsp_deduction") > 0
+        or numeric_value("fhsa_deduction") > 0
+        or numeric_value("support_payments_deduction") > 0
+    )
+    inferred_foreign_income = numeric_value("foreign_income") > 0 or numeric_value("foreign_tax_paid") > 0
+    inferred_investment_income = (
+        numeric_value("interest_income") > 0
+        or numeric_value("eligible_dividends") > 0
+        or numeric_value("non_eligible_dividends") > 0
+        or bool(wizard_totals.get("t5", 0.0))
+        or bool(wizard_totals.get("t3", 0.0))
+    )
+
+    return {
+        "has_spouse": bool_value("screen_has_spouse") or inferred_has_spouse,
+        "has_dependants": bool_value("screen_has_dependants") or inferred_has_dependants,
+        "paid_rent_or_property_tax": bool_value("screen_paid_rent_or_property_tax") or inferred_paid_rent_or_property_tax,
+        "paid_tuition": bool_value("screen_paid_tuition_or_student_loan") or inferred_paid_tuition,
+        "paid_student_loan_interest": numeric_value("student_loan_interest") > 0 or bool_value("screen_paid_tuition_or_student_loan"),
+        "had_medical_expenses": bool_value("screen_had_medical_or_donations") or inferred_had_medical,
+        "made_donations": bool_value("screen_had_medical_or_donations") or inferred_donations,
+        "had_moving_expenses": bool_value("screen_had_work_or_moving_costs") or inferred_moving,
+        "had_child_care_expenses": bool_value("screen_had_work_or_moving_costs") or inferred_child_care,
+        "had_work_expenses": bool_value("screen_had_work_or_moving_costs") or inferred_work_expenses,
+        "had_foreign_income": bool_value("screen_had_foreign_or_investment_income") or inferred_foreign_income,
+        "had_investment_income": bool_value("screen_had_foreign_or_investment_income") or inferred_investment_income,
+        "low_income_self_assessed": bool_value("screen_low_income"),
+        "wants_household_help": bool_value("screen_want_household_review"),
+        "province": province,
+        "province_name": province_name,
+    }
+
+
+def build_eligibility_guidance(screening: ScreeningInputs) -> list[GuidanceItem]:
+    items: list[GuidanceItem] = []
+
+    if screening["has_spouse"]:
+        items.append({
+            "id": "spouse_amount",
+            "priority": "likely",
+            "what": "Check the spouse / common-law partner amount.",
+            "why": "This can reduce tax if your spouse or partner had low net income.",
+            "where": "Section 4 -> Household And Dependants",
+            "estimated_here": True,
+            "confidence": "medium",
+        })
+    if screening["has_dependants"] or screening["wants_household_help"]:
+        items.append({
+            "id": "household_dependants",
+            "priority": "likely",
+            "what": "Review eligible dependant, caregiver, disability transfer, and dependant medical rules.",
+            "why": "Household-related claims are easy to miss and can affect both federal and provincial credits.",
+            "where": "Section 4 -> Household And Dependants",
+            "estimated_here": True,
+            "confidence": "medium",
+        })
+    if screening["paid_tuition"] or screening["paid_student_loan_interest"]:
+        items.append({
+            "id": "tuition_and_student",
+            "priority": "likely",
+            "what": "Check tuition, student loan interest, and any tuition carryforward amounts.",
+            "why": "These amounts often create credits now or preserve carryforwards for later years.",
+            "where": "Section 4 -> Common Credits And Claim Amounts or Section 4 -> Carryforwards And Transfers",
+            "estimated_here": True,
+            "confidence": "high",
+        })
+    if screening["had_medical_expenses"] or screening["made_donations"]:
+        items.append({
+            "id": "medical_and_donations",
+            "priority": "likely",
+            "what": "Check medical expenses and charitable donations.",
+            "why": "Even moderate amounts can create useful non-refundable credits.",
+            "where": "Section 4 -> Common Credits And Claim Amounts",
+            "estimated_here": True,
+            "confidence": "high",
+        })
+    if screening["had_work_expenses"] or screening["had_moving_expenses"] or screening["had_child_care_expenses"]:
+        items.append({
+            "id": "deductions_review",
+            "priority": "likely",
+            "what": "Review RRSP, FHSA, moving expenses, child care, support payments, and work-related deductions.",
+            "why": "Deductions reduce income directly, which can also change other credits and benefits.",
+            "where": "Section 3 -> Deductions",
+            "estimated_here": True,
+            "confidence": "high",
+        })
+    if screening["had_foreign_income"] or screening["had_investment_income"]:
+        items.append({
+            "id": "foreign_and_investment",
+            "priority": "likely",
+            "what": "Review foreign income, dividends, investment income, and foreign tax inputs.",
+            "why": "Foreign income, dividends, and investment amounts are easy to misclassify or count twice.",
+            "where": "Section 2 -> Income And Investment and Section 4 -> Foreign Tax And Dividend Credits",
+            "estimated_here": True,
+            "confidence": "medium",
+        })
+    if screening["low_income_self_assessed"]:
+        items.append({
+            "id": "low_income_refundable",
+            "priority": "maybe",
+            "what": "Check whether Canada Workers Benefit or Medical Expense Supplement may apply.",
+            "why": "Lower-income returns often qualify for refundable support that changes the final result.",
+            "where": "Section 4 -> Refundable Credit Manual Amounts (Advanced) and Section 6 -> Summary",
+            "estimated_here": True,
+            "confidence": "medium",
+        })
+        items.append({
+            "id": "gst_hst_credit",
+            "priority": "easy_to_miss",
+            "what": "Make sure you still file if GST/HST credit may matter to you.",
+            "why": "Some benefits are triggered by filing even when no tax is owing.",
+            "where": "Outside This Estimator -> CRA benefit eligibility",
+            "estimated_here": False,
+            "confidence": "medium",
+        })
+    if screening["province"] == "ON" and screening["paid_rent_or_property_tax"]:
+        items.append({
+            "id": "ontario_trillium_benefit",
+            "priority": "easy_to_miss",
+            "what": "Review Ontario Trillium Benefit separately if you paid rent or property tax.",
+            "why": "Housing-related Ontario benefits can matter even when the main tax return looks simple.",
+            "where": "Outside This Estimator -> Ontario benefit eligibility",
+            "estimated_here": False,
+            "confidence": "medium",
+        })
+    elif screening["paid_rent_or_property_tax"]:
+        items.append({
+            "id": "housing_benefits",
+            "priority": "maybe",
+            "what": "Check whether your housing costs affect province-specific benefits.",
+            "why": "Some provinces tie credits or benefits to housing costs, family status, or income level.",
+            "where": f"Section 4 -> Province-Specific Credits And Schedules and Outside This Estimator -> {screening['province_name']} benefit guidance",
+            "estimated_here": False,
+            "confidence": "low",
+        })
+
+    if not items:
+        items.append({
+            "id": "general_follow_up",
+            "priority": "maybe",
+            "what": "Check for deductions and common credits even if you already entered all your slips.",
+            "why": "Many first-time filers miss claimable items simply because they stop after entering slips.",
+            "where": "Section 3 -> Deductions and Section 4 -> Common Credits And Claim Amounts",
+            "estimated_here": True,
+            "confidence": "high",
+        })
+
+    return items
+
+
+def build_section_progress(
+    *,
+    session_state: dict,
+    wizard_totals: dict,
+    raw_inputs: dict,
+    result: dict | None = None,
+) -> SectionProgress:
+    def numeric_value(key: str) -> float:
+        return float(raw_inputs.get(key, session_state.get(key, 0.0)) or 0.0)
+
+    def bool_value(key: str) -> bool:
+        return bool(raw_inputs.get(key, session_state.get(key, False)))
+
+    def has_rows(key: str) -> bool:
+        return bool(session_state.get(key, []))
+
+    slips_started = any(has_rows(key) for key in ["t4_wizard", "t4a_wizard", "t5_wizard", "t3_wizard", "t4ps_wizard", "t2202_wizard"])
+    slips_done = slips_started
+    section_2_started = any(
+        numeric_value(key) > 0
+        for key in [
+            "employment_income",
+            "pension_income",
+            "rrsp_rrif_income",
+            "other_income",
+            "interest_income",
+            "eligible_dividends",
+            "non_eligible_dividends",
+            "foreign_income",
+            "foreign_tax_paid",
+        ]
+    )
+    section_2_done = section_2_started and (
+        numeric_value("employment_income") > 0
+        or numeric_value("pension_income") > 0
+        or numeric_value("other_income") > 0
+        or numeric_value("interest_income") > 0
+        or numeric_value("eligible_dividends") > 0
+        or numeric_value("non_eligible_dividends") > 0
+    )
+    section_3_started = any(
+        numeric_value(key) > 0
+        for key in [
+            "rrsp_deduction",
+            "fhsa_deduction",
+            "child_care_expenses",
+            "moving_expenses",
+            "support_payments_deduction",
+            "carrying_charges",
+            "other_employment_expenses",
+            "other_deductions",
+            "net_capital_loss_carryforward",
+            "other_loss_carryforward",
+        ]
+    )
+    section_3_done = section_3_started and (
+        numeric_value("rrsp_deduction") > 0
+        or numeric_value("fhsa_deduction") > 0
+        or numeric_value("child_care_expenses") > 0
+        or numeric_value("moving_expenses") > 0
+        or numeric_value("other_employment_expenses") > 0
+    )
+    section_4_started = any(
+        bool_value(key)
+        for key in [
+            "spouse_claim_enabled",
+            "eligible_dependant_claim_enabled",
+            "screen_has_spouse",
+            "screen_has_dependants",
+            "screen_want_household_review",
+        ]
+    ) or any(
+        numeric_value(key) > 0
+        for key in [
+            "spouse_amount_claim",
+            "student_loan_interest",
+            "medical_expenses_paid",
+            "charitable_donations",
+            "tuition_amount_claim",
+            "foreign_income",
+            "foreign_tax_paid",
+            "canada_workers_benefit",
+            "medical_expense_supplement",
+        ]
+    ) or has_rows("additional_dependants")
+    section_4_done = section_4_started and (
+        numeric_value("student_loan_interest") > 0
+        or numeric_value("medical_expenses_paid") > 0
+        or numeric_value("charitable_donations") > 0
+        or numeric_value("spouse_amount_claim") > 0
+        or numeric_value("eligible_dependant_claim") > 0
+        or numeric_value("foreign_income") > 0
+        or numeric_value("foreign_tax_paid") > 0
+        or has_rows("additional_dependants")
+        or bool_value("spouse_claim_enabled")
+        or bool_value("eligible_dependant_claim_enabled")
+    )
+    section_5_started = any(
+        numeric_value(key) > 0
+        for key in [
+            "income_tax_withheld",
+            "cpp_withheld",
+            "ei_withheld",
+            "installments_paid",
+            "other_payments",
+        ]
+    )
+    section_5_done = section_5_started and (
+        numeric_value("income_tax_withheld") > 0
+        or numeric_value("installments_paid") > 0
+        or numeric_value("other_payments") > 0
+    )
+    household_started = (
+        bool_value("spouse_claim_enabled")
+        or bool_value("eligible_dependant_claim_enabled")
+        or numeric_value("spouse_amount_claim") > 0
+        or numeric_value("eligible_dependant_claim") > 0
+        or numeric_value("spouse_net_income") > 0
+        or has_rows("additional_dependants")
+    )
+    household_done = household_started and (
+        numeric_value("spouse_net_income") > 0
+        or numeric_value("spouse_amount_claim") > 0
+        or numeric_value("eligible_dependant_claim") > 0
+        or has_rows("additional_dependants")
+    )
+    foreign_started = any(
+        numeric_value(key) > 0
+        for key in [
+            "foreign_income",
+            "foreign_tax_paid",
+            "t2209_non_business_tax_paid",
+            "t2209_net_foreign_non_business_income",
+            "t2209_net_income_override",
+            "t2209_basic_federal_tax_override",
+            "t2036_provincial_tax_otherwise_payable_override",
+        ]
+    )
+    foreign_done = foreign_started and (
+        numeric_value("foreign_income") > 0 or numeric_value("foreign_tax_paid") > 0
+    )
+    carryforward_started = has_rows("tuition_carryforwards") or has_rows("donation_carryforwards") or has_rows("provincial_credit_lines")
+    carryforward_done = carryforward_started
+    refundable_started = any(
+        numeric_value(key) > 0
+        for key in [
+            "canada_workers_benefit",
+            "canada_training_credit",
+            "medical_expense_supplement",
+            "other_federal_refundable_credits",
+            "manual_provincial_refundable_credits",
+            "refundable_credits",
+        ]
+    )
+    refundable_done = refundable_started and (
+        numeric_value("canada_workers_benefit") > 0
+        or numeric_value("canada_training_credit") > 0
+        or numeric_value("medical_expense_supplement") > 0
+        or numeric_value("other_federal_refundable_credits") > 0
+        or numeric_value("manual_provincial_refundable_credits") > 0
+    )
+
+    def status(started: bool, done: bool = False) -> Literal["not_started", "in_progress", "done", "not_applicable"]:
+        if done:
+            return "done"
+        return "in_progress" if started else "not_started"
+
+    return {
+        "section_1_slips": status(slips_started, slips_done),
+        "section_2_income": status(section_2_started, section_2_done),
+        "section_3_deductions": status(section_3_started, section_3_done),
+        "section_4_credits": status(section_4_started, section_4_done),
+        "section_5_payments": status(section_5_started, section_5_done),
+        "household_reviewed": status(household_started, household_done),
+        "foreign_tax_reviewed": status(foreign_started, foreign_done),
+        "carryforward_reviewed": status(carryforward_started, carryforward_done),
+        "refundable_reviewed": status(refundable_started, refundable_done),
+        "summary_reviewed": "done" if result is not None else "not_started",
+    }
+
+
+def build_completion_flags(
+    *,
+    screening: ScreeningInputs,
+    progress: SectionProgress,
+    wizard_totals: dict,
+    raw_inputs: dict,
+    result: dict | None = None,
+    readiness_df: pd.DataFrame | None = None,
+) -> list[CompletionFlag]:
+    flags: list[CompletionFlag] = []
+
+    def add(
+        flag_id: str,
+        severity: Literal["info", "review", "important"],
+        message: str,
+        where: str,
+        related_guidance_id: str | None,
+    ) -> None:
+        flags.append(
+            {
+                "id": flag_id,
+                "severity": severity,
+                "message": message,
+                "where": where,
+                "related_guidance_id": related_guidance_id,
+            }
+        )
+
+    if screening["has_spouse"] and progress["household_reviewed"] == "not_started":
+        add(
+            "spouse_not_reviewed",
+            "review",
+            "A spouse or partner is indicated, but household credits do not look reviewed yet.",
+            "Section 4 -> Household And Dependants",
+            "spouse_amount",
+        )
+    if screening["has_dependants"] and progress["household_reviewed"] == "not_started":
+        add(
+            "dependants_not_reviewed",
+            "review",
+            "Dependants are indicated, but household-related credits do not look reviewed yet.",
+            "Section 4 -> Household And Dependants",
+            "household_dependants",
+        )
+    if (screening["paid_tuition"] or screening["paid_student_loan_interest"]) and progress["carryforward_reviewed"] == "not_started":
+        add(
+            "tuition_not_reviewed",
+            "review",
+            "Tuition or student-loan signals are showing, but tuition claims or carryforwards do not look reviewed yet.",
+            "Section 4 -> Common Credits And Claim Amounts",
+            "tuition_and_student",
+        )
+    if (screening["had_medical_expenses"] or screening["made_donations"]) and progress["section_4_credits"] == "not_started":
+        add(
+            "common_credits_not_reviewed",
+            "review",
+            "Medical expenses or donations are indicated, but section 4 credits do not look reviewed yet.",
+            "Section 4 -> Common Credits And Claim Amounts",
+            "medical_and_donations",
+        )
+    if (screening["had_work_expenses"] or screening["had_moving_expenses"] or screening["had_child_care_expenses"]) and progress["section_3_deductions"] == "not_started":
+        add(
+            "deductions_not_reviewed",
+            "review",
+            "Possible deduction items are indicated, but section 3 does not look reviewed yet.",
+            "Section 3 -> Deductions",
+            "deductions_review",
+        )
+    if (screening["had_foreign_income"] or screening["had_investment_income"]) and progress["section_2_income"] == "not_started":
+        add(
+            "income_not_reviewed",
+            "review",
+            "Investment or foreign-income signals are showing, but section 2 does not look reviewed yet.",
+            "Section 2 -> Income And Investment",
+            "foreign_and_investment",
+        )
+    if screening["had_foreign_income"] and progress["foreign_tax_reviewed"] == "not_started":
+        add(
+            "foreign_tax_not_reviewed",
+            "important",
+            "Foreign-income signals are showing, but foreign-tax inputs do not look reviewed yet.",
+            "Section 4 -> Foreign Tax And Dividend Credits",
+            "foreign_and_investment",
+        )
+    if screening["low_income_self_assessed"] and progress["refundable_reviewed"] == "not_started":
+        add(
+            "refundable_not_reviewed",
+            "info",
+            "Low-income support may matter here, but refundable-credit inputs do not look reviewed yet.",
+            "Section 4 -> Refundable Credit Manual Amounts (Advanced)",
+            "low_income_refundable",
+        )
+    if result is None and progress["section_1_slips"] == "not_started":
+        add(
+            "slips_not_started",
+            "info",
+            "No slip entries are showing yet. Most users should start with slips before anything else.",
+            "Section 1A -> Slips And Source Records",
+            None,
+        )
+
+    if readiness_df is not None and not readiness_df.empty:
+        readiness_review_count = int((readiness_df["Status"] == "Review").sum())
+        readiness_missing_count = int((readiness_df["Status"] == "Missing").sum())
+        if readiness_missing_count > 0:
+            add(
+                "readiness_missing_items",
+                "important",
+                f"Filing readiness still shows {readiness_missing_count} missing item(s).",
+                "Section 6 -> Summary",
+                None,
+            )
+        elif readiness_review_count > 0:
+            add(
+                "readiness_review_items",
+                "review",
+                f"Filing readiness still shows {readiness_review_count} item(s) to review.",
+                "Section 6 -> Summary",
+                None,
+            )
+
+    severity_rank = {"important": 0, "review": 1, "info": 2}
+    return sorted(flags, key=lambda item: severity_rank[item["severity"]])
+
+
+def build_next_best_action(
+    *,
+    screening: ScreeningInputs,
+    guidance_items: list[GuidanceItem],
+    progress: SectionProgress | None = None,
+    completion_flags: list[CompletionFlag] | None = None,
+) -> NextBestAction | None:
+    if progress is not None and progress["section_1_slips"] == "not_started":
+        return {
+            "id": "start_with_slips",
+            "label": "Start with your slips.",
+            "reason": "Most returns should begin with T-slips before deductions or credits.",
+            "where": "Section 1A -> Slips And Source Records",
+            "priority": "now",
+        }
+    if completion_flags:
+        top_flag = completion_flags[0]
+        return {
+            "id": f"follow_{top_flag['id']}",
+            "label": "Review one likely missing area next.",
+            "reason": top_flag["message"],
+            "where": top_flag["where"],
+            "priority": "now" if top_flag["severity"] in {"important", "review"} else "soon",
+        }
+    if screening["has_spouse"] or screening["has_dependants"] or screening["wants_household_help"]:
+        return {
+            "id": "review_household",
+            "label": "Review household credits next.",
+            "reason": "You indicated a spouse, dependant, or household-credit question that may affect the return.",
+            "where": "Section 4 -> Household And Dependants",
+            "priority": "now",
+        }
+    if screening["had_work_expenses"] or screening["had_moving_expenses"] or screening["had_child_care_expenses"]:
+        return {
+            "id": "review_deductions",
+            "label": "Review deductions next.",
+            "reason": "Deductions are one of the most common places where first-time users miss tax savings.",
+            "where": "Section 3 -> Deductions",
+            "priority": "now",
+        }
+    if screening["paid_tuition"] or screening["paid_student_loan_interest"] or screening["had_medical_expenses"] or screening["made_donations"]:
+        return {
+            "id": "review_common_credits",
+            "label": "Review common credits next.",
+            "reason": "Tuition, medical expenses, and donations are common items that change the final result.",
+            "where": "Section 4 -> Common Credits And Claim Amounts",
+            "priority": "soon",
+        }
+    if screening["had_foreign_income"] or screening["had_investment_income"]:
+        return {
+            "id": "review_income_and_foreign_tax",
+            "label": "Review income and foreign-tax details next.",
+            "reason": "Investment and foreign-income entries are more error-prone and often worth a second look.",
+            "where": "Section 2 -> Income And Investment and Section 4 -> Foreign Tax And Dividend Credits",
+            "priority": "soon",
+        }
+    if guidance_items:
+        top_item = guidance_items[0]
+        return {
+            "id": f"follow_{top_item['id']}",
+            "label": "Follow up on the top suggested area.",
+            "reason": top_item["what"],
+            "where": top_item["where"],
+            "priority": "optional",
+        }
+    return {
+        "id": "review_summary",
+        "label": "Review your summary.",
+        "reason": "Nothing obvious is standing out yet, so the next best step is to confirm the current estimate.",
+        "where": "Section 6 -> Summary",
+        "priority": "optional",
+    }
 
 
 def render_tax_newbie_benefits_screener(province: str, province_name: str) -> None:
@@ -1767,86 +2432,107 @@ def render_tax_newbie_benefits_screener(province: str, province_name: str) -> No
                     )
                 )
 
-        likely_items: list[dict[str, str]] = []
-        maybe_items: list[dict[str, str]] = []
-        easy_to_miss_items: list[dict[str, str]] = []
-        if has_spouse_screen:
-            likely_items.append({
-                "what": "Check the spouse / common-law partner amount.",
-                "why": "This can reduce tax if your spouse or partner had low net income.",
-                "where": "`Section 4 -> Household And Dependants`",
-            })
-        if has_dependants_screen or want_household_review_screen:
-            likely_items.append({
-                "what": "Review eligible dependant, caregiver, disability transfer, and dependant medical rules.",
-                "why": "Household-related claims are easy to miss and can affect both federal and provincial credits.",
-                "where": "`Section 4 -> Household And Dependants`",
-            })
-        if paid_tuition_or_student_loan_screen:
-            likely_items.append({
-                "what": "Check tuition, student loan interest, and any tuition carryforward amounts.",
-                "why": "These amounts often create credits now or preserve carryforwards for later years.",
-                "where": "`Section 4 -> Common Credits And Claim Amounts` or `Section 4 -> Carryforwards And Transfers`",
-            })
-        if had_medical_or_donations_screen:
-            likely_items.append({
-                "what": "Check medical expenses and charitable donations.",
-                "why": "Even moderate amounts can create useful non-refundable credits.",
-                "where": "`Section 4 -> Common Credits And Claim Amounts`",
-            })
-        if had_work_or_moving_costs_screen:
-            likely_items.append({
-                "what": "Review RRSP, FHSA, moving expenses, child care, support payments, and work-related deductions.",
-                "why": "Deductions reduce income directly, which can also change other credits and benefits.",
-                "where": "`Section 3 -> Deductions`",
-            })
-        if had_foreign_or_investment_income_screen:
-            likely_items.append({
-                "what": "Review foreign income, dividends, investment income, and foreign tax inputs.",
-                "why": "Foreign income, dividends, and investment amounts are easy to misclassify or count twice.",
-                "where": "`Section 2 -> Income And Investment` and `Section 4 -> Foreign Tax And Dividend Credits`",
-            })
-        if low_income_screen:
-            maybe_items.append({
-                "what": "Check whether Canada Workers Benefit or Medical Expense Supplement may apply.",
-                "why": "Lower-income returns often qualify for refundable support that changes the final result.",
-                "where": "`Section 4 -> Refundable Credit Manual Amounts (Advanced)` and `Section 6 -> Summary`",
-            })
-            easy_to_miss_items.append({
-                "what": "Make sure you still file if GST/HST credit may matter to you.",
-                "why": "Some benefits are triggered by filing even when no tax is owing.",
-                "where": "`Outside This Estimator -> CRA benefit eligibility`",
-            })
-        if province == "ON" and paid_rent_or_property_tax_screen:
-            easy_to_miss_items.append({
-                "what": "Review Ontario Trillium Benefit separately if you paid rent or property tax.",
-                "why": "Housing-related Ontario benefits can matter even when the main tax return looks simple.",
-                "where": "`Outside This Estimator -> Ontario benefit eligibility`",
-            })
-        elif paid_rent_or_property_tax_screen:
-            maybe_items.append({
-                "what": "Check whether your housing costs affect province-specific benefits.",
-                "why": "Some provinces tie credits or benefits to housing costs, family status, or income level.",
-                "where": f"`Section 4 -> Province-Specific Credits And Schedules` and `Outside This Estimator -> {province_name} benefit guidance`",
-            })
+        wizard_signal_totals = {
+            "t3": float(bool(st.session_state.get("t3_wizard", []))),
+            "t5": float(bool(st.session_state.get("t5_wizard", []))),
+        }
+        raw_input_signals = {
+            "spouse_claim_enabled": st.session_state.get("spouse_claim_enabled", False),
+            "has_spouse_end_of_year": st.session_state.get("has_spouse_end_of_year", False),
+            "eligible_dependant_claim_enabled": st.session_state.get("eligible_dependant_claim_enabled", False),
+            "dependant_lived_with_you": st.session_state.get("dependant_lived_with_you", False),
+            "medical_expenses_paid": st.session_state.get("medical_expenses_paid", 0.0),
+            "charitable_donations": st.session_state.get("charitable_donations", 0.0),
+            "donations_eligible_total": st.session_state.get("donations_eligible_total", 0.0),
+            "moving_expenses": st.session_state.get("moving_expenses", 0.0),
+            "child_care_expenses": st.session_state.get("child_care_expenses", 0.0),
+            "other_employment_expenses": st.session_state.get("other_employment_expenses", 0.0),
+            "rrsp_deduction": st.session_state.get("rrsp_deduction", 0.0),
+            "fhsa_deduction": st.session_state.get("fhsa_deduction", 0.0),
+            "support_payments_deduction": st.session_state.get("support_payments_deduction", 0.0),
+            "foreign_income": st.session_state.get("foreign_income", 0.0),
+            "foreign_tax_paid": st.session_state.get("foreign_tax_paid", 0.0),
+            "interest_income": st.session_state.get("interest_income", 0.0),
+            "eligible_dividends": st.session_state.get("eligible_dividends", 0.0),
+            "non_eligible_dividends": st.session_state.get("non_eligible_dividends", 0.0),
+            "student_loan_interest": st.session_state.get("student_loan_interest", 0.0),
+            "tuition_amount_claim": st.session_state.get("tuition_amount_claim", 0.0),
+            "bc_renters_credit_eligible": st.session_state.get("bc_renters_credit_eligible", False),
+            "t776_property_taxes": st.session_state.get("t776_property_taxes", 0.0),
+        }
 
-        if not likely_items and not maybe_items and not easy_to_miss_items:
-            maybe_items.append({
-                "what": "Check for deductions and common credits even if you already entered all your slips.",
-                "why": "Many first-time filers miss claimable items simply because they stop after entering slips.",
-                "where": "`Section 3 -> Deductions` and `Section 4 -> Common Credits And Claim Amounts`",
-            })
+        screening = build_screening_inputs(
+            province=province,
+            province_name=province_name,
+            session_state=st.session_state,
+            wizard_totals=wizard_signal_totals,
+            raw_inputs=raw_input_signals,
+        )
+        guidance_items = build_eligibility_guidance(screening)
+        progress = build_section_progress(
+            session_state=st.session_state,
+            wizard_totals=wizard_signal_totals,
+            raw_inputs=raw_input_signals,
+            result=st.session_state.get("tax_result"),
+        )
+        completion_flags = build_completion_flags(
+            screening=screening,
+            progress=progress,
+            wizard_totals=wizard_signal_totals,
+            raw_inputs=raw_input_signals,
+            result=st.session_state.get("tax_result"),
+        )
+        has_calculated_result = st.session_state.get("tax_result") is not None
+        next_best_action = build_next_best_action(
+            screening=screening,
+            guidance_items=guidance_items,
+            progress=progress,
+            completion_flags=completion_flags,
+        )
+
+        likely_items = [
+            {"what": item["what"], "why": item["why"], "where": f"`{item['where']}`"}
+            for item in guidance_items
+            if item["priority"] == "likely"
+        ]
+        maybe_items = [
+            {"what": item["what"], "why": item["why"], "where": f"`{item['where']}`"}
+            for item in guidance_items
+            if item["priority"] == "maybe"
+        ]
+        easy_to_miss_items = [
+            {"what": item["what"], "why": item["why"], "where": f"`{item['where']}`"}
+            for item in guidance_items
+            if item["priority"] == "easy_to_miss"
+        ]
 
         always_check = [
             "If you only entered slips so far, it is still worth checking section 3 for deductions and section 4 for common credits.",
             "If you made instalments or other payments outside slips, review `5) Payments and Withholdings`.",
         ]
 
+        if next_best_action is not None and not has_calculated_result:
+            with st.container(border=True):
+                st.markdown("##### Next Best Step")
+                st.markdown(
+                    f"- [ ] {next_best_action['label']}  \n"
+                    f"  `Why:` {next_best_action['reason']}  \n"
+                    f"  `Where to go:` `{next_best_action['where']}`"
+                )
+
         render_screening_list("Likely Worth Checking", likely_items)
         render_screening_list("Maybe Relevant", maybe_items)
         render_screening_list("Not Estimated Here But Easy To Miss", easy_to_miss_items)
         if not likely_items and not maybe_items and not easy_to_miss_items:
             st.info("Tick any boxes that sound like you, and the app will suggest what to check next.")
+
+        if completion_flags and not has_calculated_result:
+            render_completion_flags_panel(
+                title="Likely Missing Or Not Yet Reviewed",
+                flags=completion_flags[:4],
+            )
+        elif has_calculated_result:
+            st.caption("See `Section 6 -> Summary` for the current next best step and the top review items.")
 
         st.caption("Good default path for most first-time users: `1A) Slips and Source Records` -> `3) Deductions` -> `4) Credits, Carryforwards, and Special Cases` -> `Summary`.")
         st.markdown("##### Good To Keep In Mind")
@@ -4928,6 +5614,81 @@ if "tax_result" in st.session_state:
             province=province,
             province_name=province_name,
         )
+        summary_wizard_signal_totals = {
+            "t3": float(bool(st.session_state.get("t3_wizard", []))),
+            "t5": float(bool(st.session_state.get("t5_wizard", []))),
+        }
+        summary_raw_input_signals = {
+            "spouse_claim_enabled": st.session_state.get("spouse_claim_enabled", False),
+            "has_spouse_end_of_year": st.session_state.get("has_spouse_end_of_year", False),
+            "eligible_dependant_claim_enabled": st.session_state.get("eligible_dependant_claim_enabled", False),
+            "dependant_lived_with_you": st.session_state.get("dependant_lived_with_you", False),
+            "medical_expenses_paid": st.session_state.get("medical_expenses_paid", 0.0),
+            "charitable_donations": st.session_state.get("charitable_donations", 0.0),
+            "donations_eligible_total": st.session_state.get("donations_eligible_total", 0.0),
+            "moving_expenses": st.session_state.get("moving_expenses", 0.0),
+            "child_care_expenses": st.session_state.get("child_care_expenses", 0.0),
+            "other_employment_expenses": st.session_state.get("other_employment_expenses", 0.0),
+            "rrsp_deduction": st.session_state.get("rrsp_deduction", 0.0),
+            "fhsa_deduction": st.session_state.get("fhsa_deduction", 0.0),
+            "support_payments_deduction": st.session_state.get("support_payments_deduction", 0.0),
+            "foreign_income": st.session_state.get("foreign_income", 0.0),
+            "foreign_tax_paid": st.session_state.get("foreign_tax_paid", 0.0),
+            "interest_income": st.session_state.get("interest_income", 0.0),
+            "eligible_dividends": st.session_state.get("eligible_dividends", 0.0),
+            "non_eligible_dividends": st.session_state.get("non_eligible_dividends", 0.0),
+            "student_loan_interest": st.session_state.get("student_loan_interest", 0.0),
+            "tuition_amount_claim": st.session_state.get("tuition_amount_claim", 0.0),
+            "bc_renters_credit_eligible": st.session_state.get("bc_renters_credit_eligible", False),
+            "t776_property_taxes": st.session_state.get("t776_property_taxes", 0.0),
+            "canada_workers_benefit": st.session_state.get("canada_workers_benefit", 0.0),
+            "canada_training_credit": st.session_state.get("canada_training_credit", 0.0),
+            "medical_expense_supplement": st.session_state.get("medical_expense_supplement", 0.0),
+            "other_federal_refundable_credits": st.session_state.get("other_federal_refundable_credits", 0.0),
+            "manual_provincial_refundable_credits": st.session_state.get("manual_provincial_refundable_credits", 0.0),
+            "refundable_credits": st.session_state.get("refundable_credits", 0.0),
+            "spouse_amount_claim": st.session_state.get("spouse_amount_claim", 0.0),
+            "eligible_dependant_claim": st.session_state.get("eligible_dependant_claim", 0.0),
+            "spouse_net_income": st.session_state.get("spouse_net_income", 0.0),
+            "income_tax_withheld": st.session_state.get("income_tax_withheld", 0.0),
+            "cpp_withheld": st.session_state.get("cpp_withheld", 0.0),
+            "ei_withheld": st.session_state.get("ei_withheld", 0.0),
+            "installments_paid": st.session_state.get("installments_paid", 0.0),
+            "other_payments": st.session_state.get("other_payments", 0.0),
+            "t2209_non_business_tax_paid": st.session_state.get("t2209_non_business_tax_paid", 0.0),
+            "t2209_net_foreign_non_business_income": st.session_state.get("t2209_net_foreign_non_business_income", 0.0),
+            "t2209_net_income_override": st.session_state.get("t2209_net_income_override", 0.0),
+            "t2209_basic_federal_tax_override": st.session_state.get("t2209_basic_federal_tax_override", 0.0),
+            "t2036_provincial_tax_otherwise_payable_override": st.session_state.get("t2036_provincial_tax_otherwise_payable_override", 0.0),
+        }
+        summary_screening = build_screening_inputs(
+            province=province,
+            province_name=province_name,
+            session_state=st.session_state,
+            wizard_totals=summary_wizard_signal_totals,
+            raw_inputs=summary_raw_input_signals,
+        )
+        summary_guidance_items = build_eligibility_guidance(summary_screening)
+        summary_progress = build_section_progress(
+            session_state=st.session_state,
+            wizard_totals=summary_wizard_signal_totals,
+            raw_inputs=summary_raw_input_signals,
+            result=result,
+        )
+        summary_completion_flags = build_completion_flags(
+            screening=summary_screening,
+            progress=summary_progress,
+            wizard_totals=summary_wizard_signal_totals,
+            raw_inputs=summary_raw_input_signals,
+            result=result,
+            readiness_df=readiness_df,
+        )
+        summary_next_best_action = build_next_best_action(
+            screening=summary_screening,
+            guidance_items=summary_guidance_items,
+            progress=summary_progress,
+            completion_flags=summary_completion_flags,
+        )
         quick_review_items, top_warning_items, top_override_items = build_results_quick_notes(
             result=result,
             readiness_df=readiness_df,
@@ -4940,6 +5701,8 @@ if "tax_result" in st.session_state:
             result=result,
             province_name=province_name,
             readiness_df=readiness_df,
+            next_best_action=summary_next_best_action,
+            completion_flags=summary_completion_flags,
         )
         with st.expander("Client Review Details", expanded=False):
             st.markdown("#### Plain-Language Numbers")
