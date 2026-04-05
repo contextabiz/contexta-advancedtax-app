@@ -16,6 +16,7 @@ from .constants import (
     NS_AGE_CREDIT_CONFIG,
     ONTARIO_AGE_AMOUNTS,
     ONTARIO_MEDICAL_DEPENDANT_LIMITS,
+    ONTARIO_SPOUSE_AMOUNTS,
     PROVINCIAL_PENSION_AMOUNTS,
     SCHEDULE_9_THRESHOLDS,
 )
@@ -222,31 +223,17 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
     schedule11_current_year_claim_requested = value(data, "schedule11_current_year_claim_requested")
     schedule11_carryforward_claim_requested = value(data, "schedule11_carryforward_claim_requested")
     schedule11_transfer_from_spouse = value(data, "schedule11_transfer_from_spouse")
-    schedule11_current_year_claim_used = min(
-        schedule11_current_year_tuition_available,
-        max(0.0, schedule11_current_year_claim_requested),
+    schedule11_training_credit_max = min(
+        canada_training_credit_limit_available,
+        schedule11_current_year_tuition_available * 0.5,
     )
-    schedule11_current_year_unused = max(
-        0.0,
-        schedule11_current_year_tuition_available - schedule11_current_year_claim_used,
-    )
-    schedule11_carryforward_claim_used = min(
-        schedule11_carryforward_available,
-        max(0.0, schedule11_carryforward_claim_requested),
-    )
-    schedule11_carryforward_unused = max(
-        0.0,
-        schedule11_carryforward_available - schedule11_carryforward_claim_used,
-    )
-    schedule11_total_available = (
-        schedule11_current_year_tuition_available + schedule11_carryforward_available
-    )
-    schedule11_total_claim_used = (
-        schedule11_current_year_claim_used + schedule11_carryforward_claim_used
-    )
-    schedule11_total_unused = (
-        schedule11_current_year_unused + schedule11_carryforward_unused
-    )
+    schedule11_current_year_claim_used = 0.0
+    schedule11_current_year_unused = schedule11_current_year_tuition_available
+    schedule11_carryforward_claim_used = 0.0
+    schedule11_carryforward_unused = schedule11_carryforward_available
+    schedule11_total_available = 0.0
+    schedule11_total_claim_used = 0.0
+    schedule11_total_unused = 0.0
     net_capital_loss_carryforward_requested = value(data, "net_capital_loss_carryforward")
     net_capital_loss_carryforward_used = min(
         net_capital_loss_carryforward_requested,
@@ -270,6 +257,8 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         + t3_non_eligible_dividends_taxable
     )
 
+    line_12100_income = interest_income + foreign_income
+
     total_income = (
         employment_income
         + pension_income
@@ -277,16 +266,37 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         + other_income
         + net_rental_income
         + taxable_capital_gains
-        + interest_income
+        + line_12100_income
         + taxable_eligible_dividends
         + taxable_non_eligible_dividends
     )
 
     employee_payroll = estimate_employee_cpp_ei(employment_income, params)
-    cpp_credit_base = employee_payroll["employee_cpp_base"]
-    cpp_deduction = employee_payroll["employee_cpp_enhanced"]
-    total_cpp = employee_payroll["employee_cpp_total"]
-    ei = employee_payroll["ei"]
+    estimated_cpp_credit_base = employee_payroll["employee_cpp_base"]
+    estimated_cpp_deduction = employee_payroll["employee_cpp_enhanced"]
+    estimated_total_cpp = employee_payroll["employee_cpp_total"]
+    estimated_ei = employee_payroll["ei"]
+
+    cpp_withheld_total = value(data, "cpp_withheld_total")
+    ei_withheld_total = value(data, "ei_withheld_total")
+    if cpp_withheld_total > 0:
+        estimated_cpp2_earnings = max(0.0, min(employment_income, params["cpp_yampe"]) - params["cpp_ympe"])
+        estimated_cpp2 = estimated_cpp2_earnings * params["cpp2_rate"]
+        cpp2_component = min(cpp_withheld_total, max(0.0, estimated_cpp2))
+        cpp_base_and_first_additional = max(0.0, cpp_withheld_total - cpp2_component)
+        base_plus_first_rate = params["cpp_base_rate"] + params["cpp_first_additional_rate"]
+        if base_plus_first_rate > 0:
+            cpp_credit_base = cpp_base_and_first_additional * (params["cpp_base_rate"] / base_plus_first_rate)
+            cpp_deduction = cpp_base_and_first_additional * (params["cpp_first_additional_rate"] / base_plus_first_rate) + cpp2_component
+        else:
+            cpp_credit_base = 0.0
+            cpp_deduction = cpp2_component
+        total_cpp = cpp_withheld_total
+    else:
+        cpp_credit_base = estimated_cpp_credit_base
+        cpp_deduction = estimated_cpp_deduction
+        total_cpp = estimated_total_cpp
+    ei = ei_withheld_total if ei_withheld_total > 0 else estimated_ei
 
     total_deductions = (
         value(data, "rrsp_deduction")
@@ -310,9 +320,16 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         - value(data, "other_loss_carryforward"),
     )
     adjusted_net_income_for_lift = max(0.0, net_income + value(data, "line_21300") + rdsp_repayment - universal_child_care_benefit - rdsp_income)
+    spouse_net_income_for_lift = spouse_net_income
+    if has_spouse_end_of_year and spouse_net_income_for_lift <= 0 and value(data, "spouse_amount_claim") > 0:
+        caregiver_addition = 2687.0 if spouse_infirm else 0.0
+        spouse_net_income_for_lift = max(
+            0.0,
+            params["federal_bpa_max"] + caregiver_addition - value(data, "spouse_amount_claim"),
+        )
     spouse_adjusted_net_income_for_lift = max(
         0.0,
-        spouse_net_income + spouse_line_21300 + spouse_rdsp_repayment - spouse_uccb - spouse_rdsp_income,
+        spouse_net_income_for_lift + spouse_line_21300 + spouse_rdsp_repayment - spouse_uccb - spouse_rdsp_income,
     )
 
     federal_age_amount_auto = 0.0
@@ -383,9 +400,14 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         is_disabled=cwb_disability_supplement_eligible,
         spouse_is_disabled=spouse_cwb_disability_supplement_eligible,
     )
-    auto_canada_training_credit = min(
-        canada_training_credit_limit_available,
-        schedule11_current_year_claim_used,
+    auto_canada_training_credit = schedule11_training_credit_max
+    canada_training_credit_used = min(
+        schedule11_training_credit_max,
+        canada_training_credit if canada_training_credit > 0 else auto_canada_training_credit,
+    )
+    schedule11_current_year_available_after_training = max(
+        0.0,
+        schedule11_current_year_tuition_available - canada_training_credit_used,
     )
     auto_medical_expense_supplement = calculate_medical_expense_supplement(
         tax_year=tax_year,
@@ -440,7 +462,7 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         credit_rate=federal_credit_rate,
     )
 
-    federal_non_refundable_credits = (
+    federal_non_refundable_credits_before_own_tuition = (
         federal_bpa * federal_credit_rate
         + min(employment_income, params["canada_employment_amount_max"]) * federal_credit_rate
         + (cpp_credit_base + ei) * federal_credit_rate
@@ -448,12 +470,60 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         + effective_eligible_dependant_claim * federal_credit_rate
         + value(data, "disability_amount_claim") * federal_credit_rate
         + max(value(data, "age_amount_claim"), federal_age_amount_auto) * federal_credit_rate
-        + (schedule11_total_claim_used + value(data, "tuition_transfer_from_spouse")) * federal_credit_rate
+        + value(data, "tuition_transfer_from_spouse") * federal_credit_rate
         + value(data, "student_loan_interest") * federal_credit_rate
         + federal_medical_claim * federal_credit_rate
         + value(data, "additional_federal_credits") * federal_credit_rate
         + donation_credit["federal_credit"]
         + federal_dividend_tax_credit
+    )
+    schedule11_line11_base = (
+        taxable_income
+        if taxable_income <= params["federal_brackets"][0][0]
+        else federal_basic_tax / federal_credit_rate
+    )
+    schedule11_line12_other_credit_base = max(
+        0.0,
+        federal_non_refundable_credits_before_own_tuition / federal_credit_rate,
+    )
+    schedule11_line13_claim_room = max(
+        0.0,
+        (federal_basic_tax - federal_non_refundable_credits_before_own_tuition) / federal_credit_rate,
+    )
+    schedule11_carryforward_claim_used = min(
+        schedule11_carryforward_available,
+        max(0.0, schedule11_carryforward_claim_requested),
+        schedule11_line13_claim_room,
+    )
+    schedule11_carryforward_unused = max(
+        0.0,
+        schedule11_carryforward_available - schedule11_carryforward_claim_used,
+    )
+    schedule11_line15_room_after_carryforward = max(
+        0.0,
+        schedule11_line13_claim_room - schedule11_carryforward_claim_used,
+    )
+    schedule11_current_year_claim_used = min(
+        schedule11_current_year_available_after_training,
+        max(0.0, schedule11_current_year_claim_requested),
+        schedule11_line15_room_after_carryforward,
+    )
+    schedule11_current_year_unused = max(
+        0.0,
+        schedule11_current_year_available_after_training - schedule11_current_year_claim_used,
+    )
+    schedule11_total_available = (
+        schedule11_current_year_available_after_training + schedule11_carryforward_available
+    )
+    schedule11_total_claim_used = (
+        schedule11_current_year_claim_used + schedule11_carryforward_claim_used
+    )
+    schedule11_total_unused = (
+        schedule11_current_year_unused + schedule11_carryforward_unused
+    )
+    federal_non_refundable_credits = (
+        federal_non_refundable_credits_before_own_tuition
+        + schedule11_total_claim_used * federal_credit_rate
     )
 
     provincial_pension_amount = 0.0
@@ -542,8 +612,22 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
     provincial_age_credit = provincial_age_amount_auto * provincial_credit_rate
     provincial_pension_claim = provincial_pension_amount
     provincial_pension_credit = provincial_pension_amount * provincial_credit_rate
+    provincial_spouse_income_base = spouse_net_income if spouse_net_income > 0 else spouse_net_income_for_lift
+    provincial_spouse_base_amount = province_params["basic_personal_amount"]
+    provincial_spouse_max_claim = province_params["basic_personal_amount"]
     provincial_spouse_claim = effective_spouse_claim
-    provincial_spouse_credit = effective_spouse_claim * provincial_credit_rate
+    if province == "ON" and household_claims["spouse_allowed"]:
+        spouse_config = ONTARIO_SPOUSE_AMOUNTS.get(tax_year)
+        if spouse_config:
+            provincial_spouse_base_amount = spouse_config["base_amount"]
+            provincial_spouse_max_claim = spouse_config["max_claim"]
+        ontario_spouse_claim_raw = calculate_spouse_amount(
+            provincial_spouse_base_amount,
+            provincial_spouse_income_base,
+            spouse_infirm,
+        )
+        provincial_spouse_claim = min(provincial_spouse_max_claim, ontario_spouse_claim_raw)
+    provincial_spouse_credit = provincial_spouse_claim * provincial_credit_rate
     provincial_eligible_dependant_claim = effective_eligible_dependant_claim
     provincial_eligible_dependant_credit = effective_eligible_dependant_claim * provincial_credit_rate
     provincial_disability_claim = value(data, "disability_amount_claim") + effective_disability_transfer
@@ -595,7 +679,7 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
     provincial_tax = provincial_tax_after_reduction
 
     t2209_net_income = t2209_net_income_override or net_income
-    t2209_basic_federal_tax = t2209_basic_federal_tax_override or federal_tax
+    t2209_basic_federal_tax = t2209_basic_federal_tax_override or federal_basic_tax
     t2209_foreign_income_ratio = (
         t2209_net_foreign_non_business_income / t2209_net_income
         if t2209_net_income > 0
@@ -689,15 +773,14 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         provincial_special_refundable_credits = pe_volunteer_credit
     canada_workers_benefit_auto_total = auto_canada_workers_benefit["credit"] + auto_cwb_disability_supplement["credit"]
     canada_workers_benefit_used = canada_workers_benefit if canada_workers_benefit > 0 else canada_workers_benefit_auto_total
-    canada_training_credit_used = canada_training_credit if canada_training_credit > 0 else auto_canada_training_credit
     medical_expense_supplement_used = (
         medical_expense_supplement if medical_expense_supplement > 0 else auto_medical_expense_supplement["credit"]
     )
     payroll_overpayment_refunds = calculate_payroll_overpayment_refunds(
         cpp_withheld=cpp_withheld_total,
         ei_withheld=ei_withheld_total,
-        expected_cpp=total_cpp,
-        expected_ei=ei,
+        expected_cpp=estimated_total_cpp,
+        expected_ei=estimated_ei,
     )
     federal_refundable_credits = (
         canada_workers_benefit_used
@@ -723,10 +806,12 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         "line_10100": employment_income,
         "line_pension_income": pension_income,
         "line_rrsp_rrif_income": rrsp_rrif_income,
-        "line_interest_income": interest_income,
+        "line_interest_income": line_12100_income,
+        "line_12100": line_12100_income,
         "line_rental_income": net_rental_income,
         "line_taxable_capital_gains": taxable_capital_gains,
         "line_other_income": other_income,
+        "line_10400": other_income,
         "additional_dependant_count": additional_dependant_count,
         "additional_dependant_caregiver_claim_total": additional_dependant_caregiver_claim_total,
         "additional_dependant_disability_transfer_available_total": additional_dependant_disability_transfer_available_total,
@@ -737,10 +822,13 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         "line_moving_expenses": value(data, "moving_expenses"),
         "line_support_payments_deduction": value(data, "support_payments_deduction"),
         "line_child_care_expenses": value(data, "child_care_expenses"),
+        "line_20700": value(data, "rpp_contribution"),
         "line_union_dues": value(data, "union_dues"),
         "line_other_employment_expenses": value(data, "other_employment_expenses"),
         "manual_net_rental_income": manual_net_rental_income,
         "schedule11_current_year_tuition_available": schedule11_current_year_tuition_available,
+        "schedule11_training_credit_max": schedule11_training_credit_max,
+        "schedule11_current_year_available_after_training": schedule11_current_year_available_after_training,
         "schedule11_carryforward_available": schedule11_carryforward_available,
         "schedule11_total_available": schedule11_total_available,
         "schedule11_current_year_claim_requested": schedule11_current_year_claim_requested,
@@ -752,6 +840,10 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         "schedule11_total_claim_used": schedule11_total_claim_used,
         "schedule11_total_unused": schedule11_total_unused,
         "schedule11_transfer_from_spouse": schedule11_transfer_from_spouse,
+        "schedule11_line11_base": schedule11_line11_base,
+        "schedule11_line12_other_credit_base": schedule11_line12_other_credit_base,
+        "schedule11_line13_claim_room": schedule11_line13_claim_room,
+        "schedule11_line15_room_after_carryforward": schedule11_line15_room_after_carryforward,
         "t776_gross_rents": value(data, "t776_gross_rents"),
         "t776_advertising": value(data, "t776_advertising"),
         "t776_insurance": value(data, "t776_insurance"),
@@ -874,6 +966,9 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         "provincial_pension_credit": provincial_pension_credit,
         "provincial_spouse_claim": provincial_spouse_claim,
         "provincial_spouse_credit": provincial_spouse_credit,
+        "provincial_spouse_income_base": provincial_spouse_income_base,
+        "provincial_spouse_base_amount": provincial_spouse_base_amount,
+        "provincial_spouse_max_claim": provincial_spouse_max_claim,
         "provincial_eligible_dependant_claim": provincial_eligible_dependant_claim,
         "provincial_eligible_dependant_credit": provincial_eligible_dependant_credit,
         "provincial_disability_claim": provincial_disability_claim,
@@ -988,6 +1083,7 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         "lift_max_credit": lift_credit["max_credit"],
         "lift_reduction_base": lift_credit.get("reduction_base", 0.0),
         "lift_credit": lift_credit["credit"],
+        "spouse_net_income_for_lift": spouse_net_income_for_lift,
         "provincial_surtax": provincial_surtax,
         "provincial_health_premium": provincial_health_premium,
         "provincial_tax": provincial_tax,
@@ -996,6 +1092,19 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         "employee_cpp": employee_payroll["employee_cpp_total"],
         "cpp_deduction": cpp_deduction,
         "cpp_credit_base": cpp_credit_base,
+        "line_22215": cpp_deduction,
+        "line_30800": cpp_credit_base,
+        "line_31200": ei,
+        "line_31260": min(employment_income, params["canada_employment_amount_max"]),
+        "line_30000": federal_bpa,
+        "line_30300": effective_spouse_claim,
+        "line_35000": federal_non_refundable_credits,
+        "line_42000": federal_tax,
+        "line_42800": provincial_tax,
+        "line_43500": total_payable,
+        "line_43700": income_tax_withheld,
+        "line_47600": installments_paid,
+        "line_48200": total_payments,
         "total_cpp": total_cpp,
         "ei": ei,
         "total_payable": total_payable,

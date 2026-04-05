@@ -1023,24 +1023,36 @@ def build_filing_readiness_df(
 
 
 def build_client_summary_df(result: dict, province_name: str) -> pd.DataFrame:
-    return build_currency_df(
-        [
-            {"Section": "Income", "Item": "Total income included", "Amount": result.get("total_income", 0.0)},
-            {"Section": "Income", "Item": "Net income after deductions", "Amount": result.get("net_income", 0.0)},
-            {"Section": "Income", "Item": "Taxable income", "Amount": result.get("taxable_income", 0.0)},
-            {"Section": "Income Tax", "Item": "Federal tax", "Amount": result.get("federal_tax", 0.0)},
-            {"Section": "Income Tax", "Item": f"{province_name} tax", "Amount": result.get("provincial_tax", 0.0)},
-            {"Section": "Income Tax", "Item": "Total income tax payable", "Amount": result.get("total_payable", 0.0)},
-            {"Section": "Payroll Contributions", "Item": "CPP and EI contributions", "Amount": result.get("total_cpp", 0.0) + result.get("ei", 0.0)},
-            {"Section": "Credits and Payments", "Item": "Total deductions used", "Amount": result.get("total_deductions", 0.0)},
-            {"Section": "Credits and Payments", "Item": "Non-refundable credits used", "Amount": result.get("federal_non_refundable_credits", 0.0) + result.get("provincial_non_refundable_credits", 0.0)},
-            {"Section": "Credits and Payments", "Item": "Refundable credits used", "Amount": result.get("refundable_credits", 0.0)},
-            {"Section": "Credits and Payments", "Item": "Income tax withheld, instalments, and other payments", "Amount": result.get("income_tax_withheld", 0.0) + result.get("installments_paid", 0.0) + result.get("other_payments", 0.0)},
-            {"Section": "Outcome", "Item": "Estimated refund", "Amount": result.get("line_48400_refund", 0.0)},
-            {"Section": "Outcome", "Item": "Estimated balance owing", "Amount": result.get("line_48500_balance_owing", 0.0)},
-        ],
-        ["Amount"],
-    )
+    rows = [
+        {"Line": "10100", "Description": "Employment income", "Amount": result.get("line_10100", 0.0)},
+        {"Line": "10400", "Description": "Other employment income", "Amount": result.get("line_10400", 0.0)},
+        {"Line": "12000", "Description": "Taxable amount of dividends", "Amount": result.get("taxable_eligible_dividends", 0.0) + result.get("taxable_non_eligible_dividends", 0.0)},
+        {"Line": "12100", "Description": "Interest and other investment income", "Amount": result.get("line_12100", 0.0)},
+        {"Line": "12700", "Description": "Taxable capital gains", "Amount": result.get("line_taxable_capital_gains", 0.0)},
+        {"Line": "15000", "Description": "Total income", "Amount": result.get("total_income", 0.0)},
+        {"Line": "20700", "Description": "Registered pension plan deduction", "Amount": result.get("line_20700", 0.0)},
+        {"Line": "22215", "Description": "CPP/QPP enhanced contributions on employment income", "Amount": result.get("line_22215", 0.0)},
+        {"Line": "23600", "Description": "Net income", "Amount": result.get("net_income", 0.0)},
+        {"Line": "26000", "Description": "Taxable income", "Amount": result.get("taxable_income", 0.0)},
+        {"Line": "30000", "Description": "Basic personal amount", "Amount": result.get("line_30000", 0.0)},
+        {"Line": "30300", "Description": "Spouse or common-law partner amount", "Amount": result.get("line_30300", 0.0)},
+        {"Line": "30800", "Description": "CPP/QPP contributions on employment income", "Amount": result.get("line_30800", 0.0)},
+        {"Line": "31200", "Description": "EI premiums on employment income", "Amount": result.get("line_31200", 0.0)},
+        {"Line": "31260", "Description": "Canada employment amount", "Amount": result.get("line_31260", 0.0)},
+        {"Line": "32300", "Description": "Tuition, education and textbook amount", "Amount": result.get("schedule11_total_claim_used", 0.0)},
+        {"Line": "35000", "Description": "Total non-refundable tax credits", "Amount": result.get("line_35000", 0.0)},
+        {"Line": "40500", "Description": "Federal foreign tax credit", "Amount": result.get("federal_foreign_tax_credit", 0.0)},
+        {"Line": "42000", "Description": "Net federal tax", "Amount": result.get("line_42000", 0.0)},
+        {"Line": "42800", "Description": "Provincial or territorial tax", "Amount": result.get("line_42800", 0.0)},
+        {"Line": "43500", "Description": "Total payable", "Amount": result.get("line_43500", 0.0)},
+        {"Line": "43700", "Description": "Total income tax deducted", "Amount": result.get("line_43700", 0.0)},
+        {"Line": "47600", "Description": "Tax paid by instalments", "Amount": "" if result.get("line_47600", 0.0) == 0 else format_currency(result.get("line_47600", 0.0))},
+        {"Line": "48200", "Description": "Total refundable credits", "Amount": result.get("line_48200", 0.0)},
+        {"Line": "48400", "Description": "Refund", "Amount": result.get("line_48400_refund", 0.0)},
+    ]
+    df = pd.DataFrame(rows)
+    df["Amount"] = df["Amount"].map(lambda value: value if isinstance(value, str) else format_currency(value))
+    return df
 
 
 def build_client_key_drivers_df(result: dict, province_name: str) -> pd.DataFrame:
@@ -3541,6 +3553,7 @@ def build_wizard_df(records: list[dict[str, float]], columns: list[str]) -> pd.D
 def line_summary_df(result: dict, province_name: str) -> pd.DataFrame:
     rows = [
         {"Line": "10100", "Description": "Employment income", "Amount": result.get("line_10100", 0.0)},
+        {"Line": "10400", "Description": "Other employment income", "Amount": result.get("line_10400", 0.0)},
         {"Line": "11500/11600", "Description": "Pension income", "Amount": result.get("line_pension_income", 0.0)},
         {"Line": "12800", "Description": "RRSP/RRIF income", "Amount": result.get("line_rrsp_rrif_income", 0.0)},
         {"Line": "12000", "Description": "Taxable eligible dividends", "Amount": result.get("taxable_eligible_dividends", 0.0)},
@@ -3556,11 +3569,14 @@ def line_summary_df(result: dict, province_name: str) -> pd.DataFrame:
         {"Line": "21900", "Description": "Moving expenses", "Amount": result.get("line_moving_expenses", 0.0)},
         {"Line": "22000", "Description": "Support payments deduction", "Amount": result.get("line_support_payments_deduction", 0.0)},
         {"Line": "22100", "Description": "Child care expenses", "Amount": result.get("line_child_care_expenses", 0.0)},
+        {"Line": "22215", "Description": "CPP enhanced contributions deduction", "Amount": result.get("line_22215", 0.0)},
         {"Line": "22200", "Description": "Dues", "Amount": result.get("line_union_dues", 0.0)},
         {"Line": "22900", "Description": "Other employment expenses", "Amount": result.get("line_other_employment_expenses", 0.0)},
         {"Line": "23600", "Description": "Net income", "Amount": result.get("net_income", 0.0)},
         {"Line": "25300", "Description": "Net capital loss carryforward", "Amount": result.get("net_capital_loss_carryforward", 0.0)},
         {"Line": "26000", "Description": "Taxable income", "Amount": result.get("taxable_income", 0.0)},
+        {"Line": "30800", "Description": "CPP/QPP contributions on employment income", "Amount": result.get("line_30800", 0.0)},
+        {"Line": "31200", "Description": "EI premiums on employment income", "Amount": result.get("line_31200", 0.0)},
         {"Line": "32300", "Description": "Tuition amount claimed", "Amount": result.get("schedule11_total_claim_used", 0.0)},
         {"Line": "34200", "Description": "Cultural / ecological gifts not subject to 75% limit", "Amount": result.get("schedule9_unlimited_gifts_claimed", 0.0)},
         {"Line": "34900", "Description": "Schedule 9 donation credit", "Amount": result.get("federal_donation_credit", 0.0)},
@@ -3811,18 +3827,23 @@ def build_t776_df(result: dict) -> pd.DataFrame:
 def build_schedule_11_df(result: dict) -> pd.DataFrame:
     return pd.DataFrame(
         [
-            {"Line": "T2202", "Description": "Current-year T2202 tuition available", "Amount": result.get("schedule11_current_year_tuition_available", 0.0)},
-            {"Line": "CF-Avail", "Description": "Prior-year tuition carryforward available", "Amount": result.get("schedule11_carryforward_available", 0.0)},
-            {"Line": "11A", "Description": "Total tuition available", "Amount": result.get("schedule11_total_available", 0.0)},
-            {"Line": "11B", "Description": "Current-year tuition claim requested", "Amount": result.get("schedule11_current_year_claim_requested", 0.0)},
-            {"Line": "11C", "Description": "Current-year tuition claim used", "Amount": result.get("schedule11_current_year_claim_used", 0.0)},
-            {"Line": "11D", "Description": "Carryforward claim requested", "Amount": result.get("schedule11_carryforward_claim_requested", 0.0)},
-            {"Line": "11E", "Description": "Carryforward claim used", "Amount": result.get("schedule11_carryforward_claim_used", 0.0)},
-            {"Line": "32300", "Description": "Federal tuition amount claimed", "Amount": result.get("schedule11_total_claim_used", 0.0)},
+            {"Line": "1", "Description": "Current-year T2202 tuition available", "Amount": result.get("schedule11_current_year_tuition_available", 0.0)},
+            {"Line": "4", "Description": "Canada training credit maximum available", "Amount": result.get("schedule11_training_credit_max", 0.0)},
+            {"Line": "5", "Description": "Canada training credit used", "Amount": result.get("canada_training_credit", 0.0)},
+            {"Line": "6", "Description": "Current-year tuition left after training credit", "Amount": result.get("schedule11_current_year_available_after_training", 0.0)},
+            {"Line": "9", "Description": "Prior-year tuition carryforward available", "Amount": result.get("schedule11_carryforward_available", 0.0)},
+            {"Line": "10", "Description": "Total tuition available for 2025", "Amount": result.get("schedule11_total_available", 0.0)},
+            {"Line": "11", "Description": "Federal tax base used for Schedule 11 room", "Amount": result.get("schedule11_line11_base", 0.0)},
+            {"Line": "12", "Description": "Other federal credits base used before tuition", "Amount": result.get("schedule11_line12_other_credit_base", 0.0)},
+            {"Line": "13", "Description": "Maximum federal tuition room before carryforward", "Amount": result.get("schedule11_line13_claim_room", 0.0)},
+            {"Line": "14", "Description": "Carryforward claim used", "Amount": result.get("schedule11_carryforward_claim_used", 0.0)},
+            {"Line": "15", "Description": "Remaining room after carryforward", "Amount": result.get("schedule11_line15_room_after_carryforward", 0.0)},
+            {"Line": "16", "Description": "Current-year tuition claim used", "Amount": result.get("schedule11_current_year_claim_used", 0.0)},
+            {"Line": "17 / 32300", "Description": "Federal tuition amount claimed", "Amount": result.get("schedule11_total_claim_used", 0.0)},
             {"Line": "Transfer-In", "Description": "Tuition transfer from spouse/partner", "Amount": result.get("schedule11_transfer_from_spouse", 0.0)},
-            {"Line": "Unused", "Description": "Unused current-year tuition", "Amount": result.get("schedule11_current_year_unused", 0.0)},
+            {"Line": "Unused-CY", "Description": "Unused current-year tuition remaining", "Amount": result.get("schedule11_current_year_unused", 0.0)},
             {"Line": "Unused-CF", "Description": "Unused carryforward remaining", "Amount": result.get("schedule11_carryforward_unused", 0.0)},
-            {"Line": "11F", "Description": "Unused tuition remaining after claim", "Amount": result.get("schedule11_total_unused", 0.0)},
+            {"Line": "Unused-Total", "Description": "Unused tuition remaining after claim", "Amount": result.get("schedule11_total_unused", 0.0)},
         ]
     )
 
@@ -5725,11 +5746,11 @@ if "tax_result" in st.session_state:
                 mime="application/pdf",
                 use_container_width=True,
             )
-        st.caption("This tab is written in simpler language for sharing with a client, family member, or reviewer. The detailed worksheet tabs remain available if you want to trace the estimate line by line.")
+        st.caption("Simpler summary for sharing. Use the worksheet tabs only if you want line detail.")
         st.caption("If you want a second review of slips, support, or filing readiness, reach out: info@contexta.biz")
 
     with return_tab:
-        st.caption("This tab is the worksheet-style view. Start with the overview, then open the line-by-line sections only if you want to trace the return in more detail.")
+        st.caption("Worksheet view. Start with the overview and open the line details only if needed.")
 
         overview_col1, overview_col2 = st.columns(2)
         with overview_col1:
@@ -5768,7 +5789,7 @@ if "tax_result" in st.session_state:
 
     with reconciliation_tab:
         st.markdown("#### Input Checks")
-        st.caption("Most users can skip this tab. Open it only if you want to trace how slips, manual entries, overrides, and final return lines connect.")
+        st.caption("Most users can skip this tab. Open it only for a deeper audit trail.")
         if top_warning_items or top_override_items:
             with st.container(border=True):
                 st.markdown("##### Why You Might Open This Tab")
@@ -5795,7 +5816,7 @@ if "tax_result" in st.session_state:
                 tuition_override=tuition_amount_claim,
             )
             render_reconciliation_panel(reconciliation_df)
-            st.caption("This view compares wizard slip totals, manual extra inputs, and the final return amounts used by the app. Non-zero differences usually mean there is an override, a cap, or an allocation rule affecting the final return.")
+            st.caption("This compares slip totals, manual inputs, and final return amounts.")
 
             st.markdown("#### Assumptions and Overrides Summary")
             assumptions_df = build_assumptions_overrides_df(
@@ -5807,16 +5828,16 @@ if "tax_result" in st.session_state:
                 t2036_provincial_tax_otherwise_payable_override=t2036_provincial_tax_otherwise_payable_override,
             )
             render_assumptions_overrides_panel(assumptions_df)
-            st.caption("This table highlights where the app used a manual override, an automatic estimate, or a cap/allocation rule instead of a straight slip-to-line mapping.")
+            st.caption("This shows overrides, estimates, and cap/allocation rules.")
 
             st.markdown("#### Missing-Support Checklist")
             missing_support_df = build_missing_support_df(result, province, province_name)
             st.dataframe(missing_support_df, use_container_width=True, hide_index=True)
-            st.caption("This checklist points to the slips, receipts, and worksheet support that would normally be worth reviewing before treating the estimate as filing-ready.")
+            st.caption("This lists support worth reviewing before filing.")
 
             st.markdown("#### Filing-Readiness Detail")
             render_filing_readiness_panel(readiness_df)
-            st.caption("Use this view as a quick preparer workflow check: `Ready` means the section looks supportable, `Review` means it likely needs human confirmation, and `Missing` means a blocking issue is still showing.")
+            st.caption("`Ready` means support looks complete. `Review` or `Missing` still need attention.")
 
             report_pack_pdf = build_report_pack_pdf(
                 result=result,
@@ -5837,7 +5858,7 @@ if "tax_result" in st.session_state:
 
     with t2209_tab:
         st.markdown("#### Foreign Tax Credit Worksheet")
-        st.caption("This tab shows how the app limited foreign tax credits using the federal and provincial worksheet flow. Most users only need this if they are checking the foreign tax calculation in detail.")
+        st.caption("Most users only need this if they are checking foreign tax credits in detail.")
         t2209_rows = build_currency_df(
             [
                 {"Group": "Source Totals", "Line": "SRC-1", "Description": "Foreign non-business income used", "Amount": result["t2209_net_foreign_non_business_income"]},
@@ -5859,31 +5880,37 @@ if "tax_result" in st.session_state:
             ],
             ["Amount"],
         )
-        st.dataframe(t2209_rows, use_container_width=True, hide_index=True)
+        with st.expander("Detailed T2209 / T2036 Lines", expanded=False):
+            st.dataframe(t2209_rows, use_container_width=True, hide_index=True)
 
     with provincial_tab:
         st.markdown(f"#### {province_name} Worksheet View")
         provincial_rows = build_provincial_worksheet_df(result, province, province_name)
         provincial_rows["Amount"] = provincial_rows["Amount"].map(format_currency)
-        st.dataframe(provincial_rows, use_container_width=True, hide_index=True)
+        with st.expander("Detailed Worksheet Lines", expanded=False):
+            st.dataframe(provincial_rows, use_container_width=True, hide_index=True)
 
     with t776_tab:
         st.markdown("#### T776 Worksheet View")
         t776_rows = build_t776_df(result)
         t776_rows["Amount"] = t776_rows["Amount"].map(format_currency)
-        st.dataframe(t776_rows, use_container_width=True, hide_index=True)
+        with st.expander("Detailed T776 Lines", expanded=False):
+            st.dataframe(t776_rows, use_container_width=True, hide_index=True)
 
     with s3_tab:
         st.markdown("#### Schedule 3 Worksheet View")
         s3_rows = build_schedule_3_df(result)
         s3_rows["Amount"] = s3_rows["Amount"].map(format_currency)
-        st.dataframe(s3_rows, use_container_width=True, hide_index=True)
+        with st.expander("Detailed Schedule 3 Lines", expanded=False):
+            st.dataframe(s3_rows, use_container_width=True, hide_index=True)
 
     with s11_tab:
         st.markdown("#### Schedule 11 Worksheet View")
+        st.caption("Training credit is applied first, then carryforward, then line 32300.")
         s11_rows = build_schedule_11_df(result)
         s11_rows["Amount"] = s11_rows["Amount"].map(format_currency)
-        st.dataframe(s11_rows, use_container_width=True, hide_index=True)
+        with st.expander("Detailed Schedule 11 Lines", expanded=False):
+            st.dataframe(s11_rows, use_container_width=True, hide_index=True)
 
     with s9_tab:
         st.markdown("#### Schedule 9 Worksheet View")
@@ -5908,7 +5935,8 @@ if "tax_result" in st.session_state:
             ],
             ["Amount"],
         )
-        st.dataframe(s9_rows, use_container_width=True, hide_index=True)
+        with st.expander("Detailed Schedule 9 Lines", expanded=False):
+            st.dataframe(s9_rows, use_container_width=True, hide_index=True)
 
     with scope_tab:
         st.markdown("#### Supported Scope")
@@ -5917,7 +5945,7 @@ if "tax_result" in st.session_state:
         st.markdown(read_public_markdown_doc("PUBLIC_BEST_FIT_AND_REVIEW_SCENARIOS.md"))
         st.markdown("#### Limitations and Boundaries")
         st.markdown(read_public_markdown_doc("PUBLIC_LIMITATIONS.md"))
-        st.caption("This page summarizes the current supported T1 scope, public-safe positioning, and the practical boundaries that still matter when using or presenting the app.")
+        st.caption("Reference notes on supported scope and limitations.")
 
     if special_tab is not None:
         with special_tab:

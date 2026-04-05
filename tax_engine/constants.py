@@ -36,6 +36,13 @@ ONTARIO_MEDICAL_DEPENDANT_LIMITS = {
     2025: 15551.0,
 }
 
+ONTARIO_SPOUSE_AMOUNTS = {
+    2025: {
+        "base_amount": 11905.0,
+        "max_claim": 10823.0,
+    },
+}
+
 SCHEDULE_9_THRESHOLDS = {
     2025: 253414.0,
 }
