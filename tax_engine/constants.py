@@ -123,15 +123,17 @@ CWB_CONFIG = {
             "excluded_working_income": 3000.0,
             "rate": 0.373,
             "max_credit": 1633.0,
-            "phaseout_threshold": 26149.0,
-            "phaseout_rate": 0.20,
+            "phaseout_threshold": 26855.0,
+            "phaseout_rate": 0.15,
+            "no_basic_amount_above": 37742.0,
         },
         "family": {
             "excluded_working_income": 3000.0,
             "rate": 0.373,
             "max_credit": 2813.0,
-            "phaseout_threshold": 29948.0,
-            "phaseout_rate": 0.20,
+            "phaseout_threshold": 30639.0,
+            "phaseout_rate": 0.15,
+            "no_basic_amount_above": 49393.0,
         },
     },
     2026: {
@@ -141,6 +143,7 @@ CWB_CONFIG = {
             "max_credit": 1680.0,
             "phaseout_threshold": 26850.0,
             "phaseout_rate": 0.20,
+            "no_basic_amount_above": 35250.0,
         },
         "family": {
             "excluded_working_income": 3000.0,
@@ -148,6 +151,7 @@ CWB_CONFIG = {
             "max_credit": 2895.0,
             "phaseout_threshold": 30750.0,
             "phaseout_rate": 0.20,
+            "no_basic_amount_above": 45225.0,
         },
     },
 }

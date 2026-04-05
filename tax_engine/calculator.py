@@ -210,6 +210,7 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
     sk_fertility_treatment_expenses = value(data, "sk_fertility_treatment_expenses")
     pe_volunteer_credit_eligible = bool(data.get("pe_volunteer_credit_eligible", False))
     canada_workers_benefit = value(data, "canada_workers_benefit")
+    cwb_basic_eligible = bool(data.get("cwb_basic_eligible", False))
     cwb_disability_supplement_eligible = bool(data.get("cwb_disability_supplement_eligible", False))
     spouse_cwb_disability_supplement_eligible = bool(data.get("spouse_cwb_disability_supplement_eligible", False))
     canada_training_credit_limit_available = value(data, "canada_training_credit_limit_available")
@@ -385,14 +386,16 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
     household_claims = evaluate_household_claims(data, federal_bpa)
     auto_spouse_amount = household_claims["spouse_auto_amount"]
     auto_eligible_dependant_amount = household_claims["eligible_auto_amount"]
-    auto_canada_workers_benefit = calculate_canada_workers_benefit(
+    cwb_family_status = has_spouse_end_of_year or eligible_dependant_claim_enabled or additional_dependant_count > 0
+    cwb_preview = calculate_canada_workers_benefit(
         tax_year=tax_year,
         working_income=employment_income,
         adjusted_net_income=adjusted_net_income_for_lift,
         spouse_adjusted_net_income=spouse_adjusted_net_income_for_lift,
         has_spouse=has_spouse_end_of_year,
+        has_eligible_dependant=cwb_family_status and not has_spouse_end_of_year,
     )
-    auto_cwb_disability_supplement = calculate_cwb_disability_supplement(
+    cwb_disability_preview = calculate_cwb_disability_supplement(
         tax_year=tax_year,
         adjusted_net_income=adjusted_net_income_for_lift,
         spouse_adjusted_net_income=spouse_adjusted_net_income_for_lift,
@@ -400,6 +403,12 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         is_disabled=cwb_disability_supplement_eligible,
         spouse_is_disabled=spouse_cwb_disability_supplement_eligible,
     )
+    if cwb_basic_eligible:
+        auto_canada_workers_benefit = cwb_preview
+        auto_cwb_disability_supplement = cwb_disability_preview
+    else:
+        auto_canada_workers_benefit = {"base_credit": 0.0, "phaseout": 0.0, "credit": 0.0, "family_income": 0.0, "no_basic_amount_above": 0.0}
+        auto_cwb_disability_supplement = {"base_credit": 0.0, "phaseout": 0.0, "credit": 0.0}
     auto_canada_training_credit = schedule11_training_credit_max
     canada_training_credit_used = min(
         schedule11_training_credit_max,
@@ -1050,10 +1059,19 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         "manual_provincial_refundable_credits": manual_provincial_refundable_credits,
         "other_manual_refundable_credits": other_manual_refundable_credits,
         "manual_refundable_credits_total": manual_refundable_credits_total,
+        "cwb_basic_eligible": float(cwb_basic_eligible),
+        "canada_workers_benefit_preview": cwb_preview["credit"] + cwb_disability_preview["credit"],
+        "canada_workers_benefit_preview_base_credit": cwb_preview["base_credit"],
+        "canada_workers_benefit_preview_phaseout": cwb_preview["phaseout"],
+        "canada_workers_benefit_preview_family_income": cwb_preview["family_income"],
+        "canada_workers_benefit_preview_no_basic_amount_above": cwb_preview["no_basic_amount_above"],
         "canada_workers_benefit_manual": canada_workers_benefit,
         "canada_workers_benefit_auto": canada_workers_benefit_auto_total,
         "canada_workers_benefit_base_credit": auto_canada_workers_benefit["base_credit"],
         "canada_workers_benefit_phaseout": auto_canada_workers_benefit["phaseout"],
+        "canada_workers_benefit_family_income": auto_canada_workers_benefit["family_income"],
+        "canada_workers_benefit_no_basic_amount_above": auto_canada_workers_benefit["no_basic_amount_above"],
+        "canada_workers_benefit_family_status": 1.0 if cwb_family_status else 0.0,
         "cwb_disability_supplement_eligible": float(cwb_disability_supplement_eligible),
         "spouse_cwb_disability_supplement_eligible": float(spouse_cwb_disability_supplement_eligible),
         "cwb_disability_supplement_auto": auto_cwb_disability_supplement["credit"],
@@ -1080,6 +1098,8 @@ def calculate_personal_tax_return(data: dict[str, Any]) -> dict[str, float]:
         "t2036_limit": t2036_limit,
         "t2036_unused_foreign_tax": t2036_unused_foreign_tax,
         "provincial_tax_otherwise_payable": provincial_tax_otherwise_payable,
+        "adjusted_net_income_for_lift": adjusted_net_income_for_lift,
+        "spouse_adjusted_net_income_for_lift": spouse_adjusted_net_income_for_lift,
         "lift_max_credit": lift_credit["max_credit"],
         "lift_reduction_base": lift_credit.get("reduction_base", 0.0),
         "lift_credit": lift_credit["credit"],

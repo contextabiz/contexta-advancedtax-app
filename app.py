@@ -1,3 +1,5 @@
+import hashlib
+import json
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -44,6 +46,12 @@ PROVINCIAL_FORM_CODES = {
     "PE": "PE428",
     "SK": "SK428",
 }
+
+
+def build_input_signature(data: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(data, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
 PROVINCIAL_CAREGIVER_HELP = {
     "AB": "AB428 caregiver amount base. Alberta's 2025 maximum is $12,922 per dependant before applying the 6% credit rate.",
     "NB": "NB428 caregiver amount base. New Brunswick's 2025 infirm dependant amount is up to $5,839 before applying the 9.4% credit rate.",
@@ -1046,6 +1054,7 @@ def build_client_summary_df(result: dict, province_name: str) -> pd.DataFrame:
         {"Line": "42800", "Description": "Provincial or territorial tax", "Amount": result.get("line_42800", 0.0)},
         {"Line": "43500", "Description": "Total payable", "Amount": result.get("line_43500", 0.0)},
         {"Line": "43700", "Description": "Total income tax deducted", "Amount": result.get("line_43700", 0.0)},
+        {"Line": "45300", "Description": "Canada workers benefit", "Amount": result.get("canada_workers_benefit", 0.0)},
         {"Line": "47600", "Description": "Tax paid by instalments", "Amount": "" if result.get("line_47600", 0.0) == 0 else format_currency(result.get("line_47600", 0.0))},
         {"Line": "48200", "Description": "Total refundable credits", "Amount": result.get("line_48200", 0.0)},
         {"Line": "48400", "Description": "Refund", "Amount": result.get("line_48400_refund", 0.0)},
@@ -1678,6 +1687,10 @@ def render_metric_row(
         column.metric(label, formatter(value))
 
 
+def format_plain_number(value: float) -> str:
+    return f"{int(value)}" if float(value).is_integer() else f"{value:.2f}"
+
+
 def render_answer_summary_sheet(
     result: dict,
     province_name: str,
@@ -1714,19 +1727,33 @@ def render_answer_summary_sheet(
         4,
     )
     st.caption(f"Filing snapshot: Ready {ready_count}, Review {review_count}, Missing {missing_count}.")
+    suggestion_lines: list[tuple[str, str]] = []
     if next_best_action is not None:
-        with st.container(border=True):
-            st.markdown("##### Next Best Step")
-            st.markdown(
-                f"- [ ] {next_best_action['label']}  \n"
-                f"  `Why:` {next_best_action['reason']}  \n"
-                f"  `Where to go:` `{next_best_action['where']}`"
+        suggestion_lines.append(
+            (
+                next_best_action["label"],
+                f"`Why:` {next_best_action['reason']}  \n`Where to go:` `{next_best_action['where']}`",
             )
-    if completion_flags:
-        render_completion_flags_panel(
-            title="Still Worth Checking",
-            flags=completion_flags[:2],
         )
+    if completion_flags:
+        seen_messages = {next_best_action["reason"]} if next_best_action is not None else set()
+        for flag in completion_flags:
+            if flag["message"] in seen_messages:
+                continue
+            suggestion_lines.append(
+                (
+                    "Review this area",
+                    f"`Why:` {flag['message']}  \n`Where to go:` `{flag['where']}`",
+                )
+            )
+            seen_messages.add(flag["message"])
+    if suggestion_lines:
+        with st.container(border=True):
+            st.markdown("##### Suggestion")
+            for label, detail in suggestion_lines:
+                st.markdown(f"- [ ] {label}  \n  {detail}")
+    if next_best_action is not None and next_best_action.get("note"):
+        st.caption(next_best_action["note"])
 
 
 class ScreeningInputs(TypedDict):
@@ -1764,6 +1791,8 @@ class NextBestAction(TypedDict):
     reason: str
     where: str
     priority: Literal["now", "soon", "optional"]
+    note: str | None
+    note: str | None
 
 
 class SectionProgress(TypedDict):
@@ -2014,9 +2043,24 @@ def build_section_progress(
     def has_rows(key: str) -> bool:
         return bool(session_state.get(key, []))
 
+    def wizard_has_nonzero(key: str, fields: list[str]) -> bool:
+        rows = session_state.get(key, [])
+        if not rows:
+            return False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for field in fields:
+                try:
+                    if float(row.get(field, 0.0) or 0.0) > 0:
+                        return True
+                except (TypeError, ValueError):
+                    continue
+        return False
+
     slips_started = any(has_rows(key) for key in ["t4_wizard", "t4a_wizard", "t5_wizard", "t3_wizard", "t4ps_wizard", "t2202_wizard"])
     slips_done = slips_started
-    section_2_started = any(
+    section_2_manual_started = any(
         numeric_value(key) > 0
         for key in [
             "employment_income",
@@ -2030,6 +2074,12 @@ def build_section_progress(
             "foreign_tax_paid",
         ]
     )
+    section_2_slip_started = (
+        wizard_has_nonzero("t5_wizard", ["box13_interest", "box15_foreign_income", "box25_eligible_dividends_taxable", "box11_non_eligible_dividends_taxable"])
+        or wizard_has_nonzero("t3_wizard", ["box21_capital_gains", "box26_other_income", "box25_foreign_income", "box50_eligible_dividends_taxable", "box32_non_eligible_dividends_taxable"])
+        or wizard_has_nonzero("t4ps_wizard", ["box25_non_eligible_dividends_taxable", "box31_eligible_dividends_taxable", "box34_capital_gains_or_losses", "box35_other_employment_income", "box37_foreign_non_business_income"])
+    )
+    section_2_started = section_2_manual_started or section_2_slip_started
     section_2_done = section_2_started and (
         numeric_value("employment_income") > 0
         or numeric_value("pension_income") > 0
@@ -2037,6 +2087,7 @@ def build_section_progress(
         or numeric_value("interest_income") > 0
         or numeric_value("eligible_dividends") > 0
         or numeric_value("non_eligible_dividends") > 0
+        or section_2_slip_started
     )
     section_3_started = any(
         numeric_value(key) > 0
@@ -2151,13 +2202,14 @@ def build_section_progress(
             "manual_provincial_refundable_credits",
             "refundable_credits",
         ]
-    )
+    ) or bool_value("cwb_basic_eligible")
     refundable_done = refundable_started and (
         numeric_value("canada_workers_benefit") > 0
         or numeric_value("canada_training_credit") > 0
         or numeric_value("medical_expense_supplement") > 0
         or numeric_value("other_federal_refundable_credits") > 0
         or numeric_value("manual_provincial_refundable_credits") > 0
+        or bool_value("cwb_basic_eligible")
     )
 
     def status(started: bool, done: bool = False) -> Literal["not_started", "in_progress", "done", "not_applicable"]:
@@ -2211,7 +2263,7 @@ def build_completion_flags(
         add(
             "spouse_not_reviewed",
             "review",
-            "A spouse or partner is indicated, but household credits do not look reviewed yet.",
+            "A spouse or partner may be relevant here. If you had a spouse or common-law partner at year end and have not reviewed the spouse amount settings yet, you may still have spouse-related credits or benefit eligibility to check.",
             "Section 4 -> Household And Dependants",
             "spouse_amount",
         )
@@ -2271,6 +2323,34 @@ def build_completion_flags(
             "Section 4 -> Refundable Credit Manual Amounts (Advanced)",
             "low_income_refundable",
         )
+    cwb_manual_amount = float(raw_inputs.get("canada_workers_benefit", 0.0) or 0.0)
+    cwb_auto_amount = float(result.get("canada_workers_benefit_auto", 0.0)) if result is not None else 0.0
+    cwb_preview_amount = float(result.get("canada_workers_benefit_preview", cwb_auto_amount)) if result is not None else 0.0
+    cwb_working_income = (
+        float(result.get("line_10100", 0.0)) + float(result.get("line_10400", 0.0))
+        if result is not None
+        else (float(wizard_totals.get("employment_income", 0.0) or 0.0) if wizard_totals else 0.0)
+    )
+    cwb_family_income = float(result.get("canada_workers_benefit_preview_family_income", result.get("canada_workers_benefit_family_income", 0.0))) if result is not None else 0.0
+    cwb_no_basic_amount_above = float(result.get("canada_workers_benefit_preview_no_basic_amount_above", result.get("canada_workers_benefit_no_basic_amount_above", 0.0))) if result is not None else 0.0
+    if (
+        result is not None
+        and cwb_manual_amount == 0.0
+        and not bool(raw_inputs.get("cwb_basic_eligible", False))
+        and progress["refundable_reviewed"] != "done"
+        and cwb_working_income > 3000.0
+        and (
+            cwb_preview_amount > 0.0
+            or (cwb_no_basic_amount_above > 0.0 and cwb_family_income <= cwb_no_basic_amount_above)
+        )
+    ):
+        add(
+            "cwb_may_apply",
+            "review",
+            "Canada Workers Benefit may still be relevant based on the current working-income and family-income range. Review it if you have not checked that section yet.",
+            "Section 4 -> Refundable Credit Manual Amounts (Advanced)",
+            "low_income_refundable",
+        )
     if result is None and progress["section_1_slips"] == "not_started":
         add(
             "slips_not_started",
@@ -2279,26 +2359,6 @@ def build_completion_flags(
             "Section 1A -> Slips And Source Records",
             None,
         )
-
-    if readiness_df is not None and not readiness_df.empty:
-        readiness_review_count = int((readiness_df["Status"] == "Review").sum())
-        readiness_missing_count = int((readiness_df["Status"] == "Missing").sum())
-        if readiness_missing_count > 0:
-            add(
-                "readiness_missing_items",
-                "important",
-                f"Filing readiness still shows {readiness_missing_count} missing item(s).",
-                "Section 6 -> Summary",
-                None,
-            )
-        elif readiness_review_count > 0:
-            add(
-                "readiness_review_items",
-                "review",
-                f"Filing readiness still shows {readiness_review_count} item(s) to review.",
-                "Section 6 -> Summary",
-                None,
-            )
 
     severity_rank = {"important": 0, "review": 1, "info": 2}
     return sorted(flags, key=lambda item: severity_rank[item["severity"]])
@@ -2318,6 +2378,7 @@ def build_next_best_action(
             "reason": "Most returns should begin with T-slips before deductions or credits.",
             "where": "Section 1A -> Slips And Source Records",
             "priority": "now",
+            "note": None,
         }
     if completion_flags:
         top_flag = completion_flags[0]
@@ -2327,14 +2388,18 @@ def build_next_best_action(
             "reason": top_flag["message"],
             "where": top_flag["where"],
             "priority": "now" if top_flag["severity"] in {"important", "review"} else "soon",
+            "note": None,
         }
-    if screening["has_spouse"] or screening["has_dependants"] or screening["wants_household_help"]:
+    if (
+        screening["has_spouse"] or screening["has_dependants"] or screening["wants_household_help"]
+    ) and (progress is None or progress["household_reviewed"] != "done"):
         return {
             "id": "review_household",
             "label": "Review household credits next.",
             "reason": "You indicated a spouse, dependant, or household-credit question that may affect the return.",
             "where": "Section 4 -> Household And Dependants",
             "priority": "now",
+            "note": None,
         }
     if screening["had_work_expenses"] or screening["had_moving_expenses"] or screening["had_child_care_expenses"]:
         return {
@@ -2343,6 +2408,7 @@ def build_next_best_action(
             "reason": "Deductions are one of the most common places where first-time users miss tax savings.",
             "where": "Section 3 -> Deductions",
             "priority": "now",
+            "note": None,
         }
     if screening["paid_tuition"] or screening["paid_student_loan_interest"] or screening["had_medical_expenses"] or screening["made_donations"]:
         return {
@@ -2351,6 +2417,7 @@ def build_next_best_action(
             "reason": "Tuition, medical expenses, and donations are common items that change the final result.",
             "where": "Section 4 -> Common Credits And Claim Amounts",
             "priority": "soon",
+            "note": None,
         }
     if screening["had_foreign_income"] or screening["had_investment_income"]:
         return {
@@ -2359,6 +2426,7 @@ def build_next_best_action(
             "reason": "Investment and foreign-income entries are more error-prone and often worth a second look.",
             "where": "Section 2 -> Income And Investment and Section 4 -> Foreign Tax And Dividend Credits",
             "priority": "soon",
+            "note": None,
         }
     if guidance_items:
         top_item = guidance_items[0]
@@ -2368,13 +2436,18 @@ def build_next_best_action(
             "reason": top_item["what"],
             "where": top_item["where"],
             "priority": "optional",
+            "note": None,
         }
+    note = None
+    if progress is not None and progress["household_reviewed"] == "done" and screening["has_spouse"]:
+        note = "Household spouse settings have already been reviewed. If the spouse-related amount still looks off, check spouse net income and any support or separation details."
     return {
         "id": "review_summary",
         "label": "Review your summary.",
         "reason": "Nothing obvious is standing out yet, so the next best step is to confirm the current estimate.",
         "where": "Section 6 -> Summary",
         "priority": "optional",
+        "note": note,
     }
 
 
@@ -2718,6 +2791,7 @@ def render_diagnostics_panel(checks: list[tuple[str, str, str]]) -> None:
             ("Info", float(severity_counts["Info"])),
         ],
         3,
+        formatter=format_plain_number,
     )
     for severity, category, message in checks:
         style = severity_styles.get(severity, {"bg": "#374151", "fg": "#f3f4f6"})
@@ -2775,6 +2849,7 @@ def render_assumptions_overrides_panel(df: pd.DataFrame) -> None:
             ("Calculated Paths", float(calculated_count)),
         ],
         4,
+        formatter=format_plain_number,
     )
 
     for _, row in df.iterrows():
@@ -3234,6 +3309,8 @@ def collect_diagnostics(context: dict[str, float | int | bool]) -> list[tuple[st
         add("High", "Household", "Spouse amount is selected while support payments to the spouse/common-law partner are indicated.")
     if context["spouse_claim_enabled"] and context["separated_in_year"]:
         add("Warning", "Household", "Spouse amount is selected while 'Separated in Year' is checked. Review whether the spouse amount should still be claimed.")
+    if context["spouse_claim_enabled"] and context["has_spouse_end_of_year"] and not context["separated_in_year"] and not context["support_payments_to_spouse"]:
+        add("Info", "Household", "Spouse amount settings have been reviewed. If the final spouse-related amount still looks off, check spouse net income and any support or separation details.")
     if context["eligible_dependant_claim_enabled"] and not context["dependant_lived_with_you"]:
         add("Warning", "Household", "Eligible dependant is selected, but 'Dependant Lived With You' is not checked.")
     if context["eligible_dependant_claim_enabled"] and context["dependant_relationship"] == "Other":
@@ -3307,6 +3384,8 @@ def collect_diagnostics(context: dict[str, float | int | bool]) -> list[tuple[st
 
     if context["canada_workers_benefit_manual"] > 0 and context["canada_workers_benefit_auto"] > 0:
         add("Info", "Refundable credits", "A manual Canada Workers Benefit override is entered. The app will use your manual amount instead of the automatic estimate.")
+    if context["cwb_basic_eligible"] and context["canada_workers_benefit_auto"] == 0 and context["canada_workers_benefit_manual"] == 0:
+        add("Info", "Refundable credits", "CWB has already been flagged for review. If the amount still looks off, check working income, family-income range, and any Schedule 6 restrictions.")
     if context["estimated_working_income"] <= 3000 and (context["canada_workers_benefit_manual"] > 0 or context["canada_workers_benefit_auto"] > 0):
         add("Warning", "Refundable credits", "Canada Workers Benefit is present, but working income is at or below the basic working-income threshold. Review eligibility.")
     if context["cwb_disability_supplement_eligible"] and context["canada_workers_benefit_auto"] == 0:
@@ -3844,6 +3923,100 @@ def build_schedule_11_df(result: dict) -> pd.DataFrame:
             {"Line": "Unused-CY", "Description": "Unused current-year tuition remaining", "Amount": result.get("schedule11_current_year_unused", 0.0)},
             {"Line": "Unused-CF", "Description": "Unused carryforward remaining", "Amount": result.get("schedule11_carryforward_unused", 0.0)},
             {"Line": "Unused-Total", "Description": "Unused tuition remaining after claim", "Amount": result.get("schedule11_total_unused", 0.0)},
+        ]
+    )
+
+
+def build_federal_net_tax_build_up_df(result: dict) -> pd.DataFrame:
+    split_income_tax = 0.0
+    investment_tax_credit = 0.0
+    total_federal_credits = (
+        result.get("federal_non_refundable_credits", 0.0)
+        + result.get("federal_foreign_tax_credit", 0.0)
+        + investment_tax_credit
+    )
+    return pd.DataFrame(
+        [
+            {"Line": "119 / 40424", "Description": "Federal tax on taxable income", "Amount": result.get("federal_basic_tax", 0.0)},
+            {"Line": "120 / 40400", "Description": "Federal tax on split income", "Amount": split_income_tax},
+            {"Line": "121", "Description": "Federal tax before credits", "Amount": result.get("federal_basic_tax", 0.0) + split_income_tax},
+            {"Line": "122 / 35000", "Description": "Federal non-refundable tax credits", "Amount": result.get("federal_non_refundable_credits", 0.0)},
+            {"Line": "123 / 40500", "Description": "Federal foreign tax credit", "Amount": result.get("federal_foreign_tax_credit", 0.0)},
+            {"Line": "124 / 40427", "Description": "Federal investment tax credit", "Amount": investment_tax_credit},
+            {"Line": "125", "Description": "Total federal credits claimed", "Amount": total_federal_credits},
+            {"Line": "42000", "Description": "Net federal tax", "Amount": result.get("federal_tax", 0.0)},
+        ]
+    )
+
+
+def build_on428_part_c_df(result: dict) -> pd.DataFrame:
+    line74_basic_reduction = 294.0
+    line75_child_reduction = result.get("ontario_child_reduction", 0.0)
+    line76_impairment_reduction = result.get("ontario_impairment_reduction", 0.0)
+    line77_total_reduction_base = line74_basic_reduction + line75_child_reduction + line76_impairment_reduction
+    line78_doubled_reduction = line77_total_reduction_base * 2.0
+    line79_tax_before_reduction = result.get("provincial_tax_after_dividend_credit", 0.0)
+    line80_ontario_tax_reduction = result.get("provincial_tax_reduction", 0.0)
+    line81_tax_after_reduction = result.get("provincial_tax_after_reduction", 0.0)
+    line82_provincial_foreign_tax_credit = result.get("provincial_foreign_tax_credit", 0.0)
+    line83_tax_after_foreign_tax_credit = result.get("provincial_tax_after_foreign_tax_credit", 0.0)
+    line84_amount_before_lift = line83_tax_after_foreign_tax_credit
+    line85_lift = result.get("lift_credit", 0.0)
+    line86_tax_after_lift = result.get("provincial_tax_after_lift_credit", 0.0)
+    line87_food_donation_credit = 0.0
+    line88_tax_before_health_premium = line86_tax_after_lift - line87_food_donation_credit
+    line89_health_premium = result.get("provincial_health_premium", 0.0)
+    line90_final_ontario_tax = result.get("provincial_tax", 0.0)
+    return pd.DataFrame(
+        [
+            {"Line": "74", "Description": "Basic reduction", "Amount": line74_basic_reduction},
+            {"Line": "75", "Description": "Reduction for dependent children", "Amount": line75_child_reduction},
+            {"Line": "76", "Description": "Reduction for dependants with impairment", "Amount": line76_impairment_reduction},
+            {"Line": "77", "Description": "Total reduction base", "Amount": line77_total_reduction_base},
+            {"Line": "78", "Description": "Line 77 multiplied by 2", "Amount": line78_doubled_reduction},
+            {"Line": "79", "Description": "Tax before Ontario tax reduction", "Amount": line79_tax_before_reduction},
+            {"Line": "80", "Description": "Ontario tax reduction", "Amount": line80_ontario_tax_reduction},
+            {"Line": "81", "Description": "Tax after reduction", "Amount": line81_tax_after_reduction},
+            {"Line": "82", "Description": "Provincial foreign tax credit", "Amount": line82_provincial_foreign_tax_credit},
+            {"Line": "83", "Description": "Tax after provincial foreign tax credit", "Amount": line83_tax_after_foreign_tax_credit},
+            {"Line": "84", "Description": "Amount before LIFT", "Amount": line84_amount_before_lift},
+            {"Line": "85", "Description": "LIFT credit", "Amount": line85_lift},
+            {"Line": "86", "Description": "Tax after LIFT", "Amount": line86_tax_after_lift},
+            {"Line": "87", "Description": "Community food donation credit for farmers", "Amount": line87_food_donation_credit},
+            {"Line": "88", "Description": "Tax before health premium", "Amount": line88_tax_before_health_premium},
+            {"Line": "89", "Description": "Ontario health premium", "Amount": line89_health_premium},
+            {"Line": "90 / 42800", "Description": "Ontario tax", "Amount": line90_final_ontario_tax},
+        ]
+    )
+
+
+def build_on428a_lift_df(result: dict) -> pd.DataFrame:
+    working_income = result.get("line_10100", 0.0)
+    line2_employment_based_credit = working_income * 0.0505
+    line3_max_allowable_credit = result.get("lift_max_credit", 0.0)
+    adjusted_net_income = result.get("adjusted_net_income_for_lift", 0.0)
+    spouse_adjusted_net_income = result.get("spouse_adjusted_net_income_for_lift", 0.0)
+    single_threshold = 32500.0
+    family_threshold = 65000.0
+    single_excess = max(0.0, adjusted_net_income - single_threshold)
+    family_net_income = adjusted_net_income + spouse_adjusted_net_income
+    family_excess = max(0.0, family_net_income - family_threshold)
+    reduction_base = result.get("lift_reduction_base", 0.0)
+    line11_phaseout_reduction = reduction_base * 0.05
+    return pd.DataFrame(
+        [
+            {"Line": "1", "Description": "Employment income used", "Amount": working_income},
+            {"Line": "2", "Description": "Employment income multiplied by 5.05%", "Amount": line2_employment_based_credit},
+            {"Line": "3", "Description": "Maximum allowable credit", "Amount": line3_max_allowable_credit},
+            {"Line": "4", "Description": "Adjusted net income", "Amount": adjusted_net_income},
+            {"Line": "5", "Description": "Single threshold", "Amount": single_threshold},
+            {"Line": "6", "Description": "Single-income excess", "Amount": single_excess},
+            {"Line": "7", "Description": "Family adjusted net income", "Amount": family_net_income},
+            {"Line": "8", "Description": "Family threshold", "Amount": family_threshold},
+            {"Line": "9", "Description": "Family-income excess", "Amount": family_excess},
+            {"Line": "10", "Description": "Reduction base used", "Amount": reduction_base},
+            {"Line": "11", "Description": "Phaseout reduction at 5%", "Amount": line11_phaseout_reduction},
+            {"Line": "12 / ON428 line 85", "Description": "LIFT credit claimed", "Amount": result.get("lift_credit", 0.0)},
         ]
     )
 
@@ -4738,6 +4911,12 @@ with st.expander("4) Credits, Carryforwards, and Special Cases (Optional)", expa
             key="canada_workers_benefit",
             help="Leave at 0 to use the app's estimate. Enter your own amount only if you are following the worksheet manually.",
         )
+        cwb_basic_eligible = refundable_col1.checkbox(
+            "Eligible for CWB",
+            value=bool(st.session_state.get("cwb_basic_eligible", False)),
+            key="cwb_basic_eligible",
+            help="Check this if you want the app to include an automatic Canada Workers Benefit estimate. If you leave this unchecked, the app will not auto-calculate line 45300.",
+        )
         cwb_disability_supplement_eligible = refundable_col1.checkbox(
             "Eligible for CWB Disability Supplement",
             value=bool(st.session_state.get("cwb_disability_supplement_eligible", False)),
@@ -5258,21 +5437,25 @@ estimated_spouse_adjusted_net_income_for_cwb = max(
     0.0,
     spouse_net_income + spouse_line_21300 + spouse_rdsp_repayment - spouse_uccb - spouse_rdsp_income,
 )
-auto_canada_workers_benefit_preview = calculate_canada_workers_benefit(
-    tax_year=tax_year,
-    working_income=employment_income,
-    adjusted_net_income=estimated_adjusted_net_income_for_cwb,
-    spouse_adjusted_net_income=estimated_spouse_adjusted_net_income_for_cwb,
-    has_spouse=has_spouse_end_of_year,
-)
-auto_cwb_disability_supplement_preview = calculate_cwb_disability_supplement(
-    tax_year=tax_year,
-    adjusted_net_income=estimated_adjusted_net_income_for_cwb,
-    spouse_adjusted_net_income=estimated_spouse_adjusted_net_income_for_cwb,
-    has_spouse=has_spouse_end_of_year,
-    is_disabled=cwb_disability_supplement_eligible,
-    spouse_is_disabled=spouse_cwb_disability_supplement_eligible,
-)
+if cwb_basic_eligible:
+    auto_canada_workers_benefit_preview = calculate_canada_workers_benefit(
+        tax_year=tax_year,
+        working_income=employment_income,
+        adjusted_net_income=estimated_adjusted_net_income_for_cwb,
+        spouse_adjusted_net_income=estimated_spouse_adjusted_net_income_for_cwb,
+        has_spouse=has_spouse_end_of_year,
+    )
+    auto_cwb_disability_supplement_preview = calculate_cwb_disability_supplement(
+        tax_year=tax_year,
+        adjusted_net_income=estimated_adjusted_net_income_for_cwb,
+        spouse_adjusted_net_income=estimated_spouse_adjusted_net_income_for_cwb,
+        has_spouse=has_spouse_end_of_year,
+        is_disabled=cwb_disability_supplement_eligible,
+        spouse_is_disabled=spouse_cwb_disability_supplement_eligible,
+    )
+else:
+    auto_canada_workers_benefit_preview = {"base_credit": 0.0, "phaseout": 0.0, "credit": 0.0}
+    auto_cwb_disability_supplement_preview = {"base_credit": 0.0, "phaseout": 0.0, "credit": 0.0}
 auto_medical_expense_supplement_preview = calculate_medical_expense_supplement(
     tax_year=tax_year,
     employment_income=employment_income,
@@ -5369,6 +5552,7 @@ diagnostics = collect_diagnostics(
         "t4_box26_total": t4_reference_box26_total,
         "estimator_ei_insurable_earnings": estimator_ei_insurable_earnings,
         "estimator_cpp_pensionable_earnings": estimator_cpp_pensionable_earnings,
+        "cwb_basic_eligible": float(cwb_basic_eligible),
         "canada_workers_benefit_manual": canada_workers_benefit,
         "canada_workers_benefit_auto": auto_canada_workers_benefit_preview["credit"] + auto_cwb_disability_supplement_preview["credit"],
         "cwb_disability_supplement_eligible": float(cwb_disability_supplement_eligible),
@@ -5412,9 +5596,7 @@ if reset_clicked:
         del st.session_state[key]
     st.rerun()
 
-if calculate_clicked:
-    result = calculate_personal_tax_return(
-        {
+calculation_inputs = {
             "tax_year": tax_year,
             "province": province,
             "age": age,
@@ -5547,6 +5729,7 @@ if calculate_clicked:
             "installments_paid": installments_paid,
             "other_payments": other_payments,
             "canada_workers_benefit": canada_workers_benefit,
+            "cwb_basic_eligible": cwb_basic_eligible,
             "cwb_disability_supplement_eligible": cwb_disability_supplement_eligible,
             "spouse_cwb_disability_supplement_eligible": spouse_cwb_disability_supplement_eligible,
             "canada_training_credit_limit_available": canada_training_credit_limit_available,
@@ -5582,11 +5765,26 @@ if calculate_clicked:
             "nl479_other_refundable_credits": nl479_other_refundable_credits,
             "t4ps_box41_epsp_contributions": t4ps_box41_epsp_contributions,
         }
-    )
+current_input_signature = build_input_signature(calculation_inputs)
+
+stored_input_signature = st.session_state.get("tax_result_input_signature")
+if (
+    "tax_result" in st.session_state
+    and stored_input_signature is not None
+    and stored_input_signature != current_input_signature
+    and not calculate_clicked
+):
+    del st.session_state["tax_result"]
+    del st.session_state["tax_result_input_signature"]
+    st.rerun()
+
+if calculate_clicked:
+    result = calculate_personal_tax_return(calculation_inputs)
     postcalc_diagnostics = collect_postcalc_diagnostics(result)
     st.session_state["tax_result"] = result
+    st.session_state["tax_result_input_signature"] = current_input_signature
 
-if "tax_result" in st.session_state:
+if "tax_result" in st.session_state and st.session_state.get("tax_result_input_signature") == current_input_signature:
     result = st.session_state["tax_result"]
     postcalc_diagnostics = collect_postcalc_diagnostics(result)
 
@@ -5786,6 +5984,10 @@ if "tax_result" in st.session_state:
             package_df = build_return_package_df(result, province_name)
             st.markdown("#### Included Forms And Schedules")
             st.dataframe(package_df, use_container_width=True, hide_index=True)
+        with st.expander("Federal Net Tax Build-Up", expanded=False):
+            federal_build_up_df = build_federal_net_tax_build_up_df(result)
+            federal_build_up_df["Amount"] = federal_build_up_df["Amount"].map(format_currency)
+            st.dataframe(federal_build_up_df, use_container_width=True, hide_index=True)
 
     with reconciliation_tab:
         st.markdown("#### Input Checks")
@@ -5885,6 +6087,15 @@ if "tax_result" in st.session_state:
 
     with provincial_tab:
         st.markdown(f"#### {province_name} Worksheet View")
+        if province == "ON":
+            with st.expander("ON428 Part C Lines 74-90", expanded=False):
+                on428_part_c_df = build_on428_part_c_df(result)
+                on428_part_c_df["Amount"] = on428_part_c_df["Amount"].map(format_currency)
+                st.dataframe(on428_part_c_df, use_container_width=True, hide_index=True)
+            with st.expander("ON428-A LIFT Worksheet", expanded=False):
+                on428a_lift_df = build_on428a_lift_df(result)
+                on428a_lift_df["Amount"] = on428a_lift_df["Amount"].map(format_currency)
+                st.dataframe(on428a_lift_df, use_container_width=True, hide_index=True)
         provincial_rows = build_provincial_worksheet_df(result, province, province_name)
         provincial_rows["Amount"] = provincial_rows["Amount"].map(format_currency)
         with st.expander("Detailed Worksheet Lines", expanded=False):

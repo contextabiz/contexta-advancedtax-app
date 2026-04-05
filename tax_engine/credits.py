@@ -56,11 +56,13 @@ def calculate_canada_workers_benefit(
     adjusted_net_income: float,
     spouse_adjusted_net_income: float,
     has_spouse: bool,
+    has_eligible_dependant: bool = False,
 ) -> dict[str, float]:
     config = CWB_CONFIG.get(tax_year)
     if not config:
-        return {"base_credit": 0.0, "phaseout": 0.0, "credit": 0.0}
-    bucket = config["family"] if has_spouse else config["single"]
+        return {"base_credit": 0.0, "phaseout": 0.0, "credit": 0.0, "family_income": 0.0, "no_basic_amount_above": 0.0}
+    is_family = has_spouse or has_eligible_dependant
+    bucket = config["family"] if is_family else config["single"]
     working_income_excess = max(0.0, working_income - bucket["excluded_working_income"])
     base_credit = min(bucket["max_credit"], working_income_excess * bucket["rate"])
     family_income = adjusted_net_income + (spouse_adjusted_net_income if has_spouse else 0.0)
@@ -70,6 +72,8 @@ def calculate_canada_workers_benefit(
         "base_credit": base_credit,
         "phaseout": phaseout,
         "credit": max(0.0, base_credit - phaseout),
+        "family_income": family_income,
+        "no_basic_amount_above": bucket.get("no_basic_amount_above", bucket["phaseout_threshold"] + (bucket["max_credit"] / bucket["phaseout_rate"])),
     }
 
 
