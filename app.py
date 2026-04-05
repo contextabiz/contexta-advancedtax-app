@@ -3107,7 +3107,7 @@ with st.container(border=True):
         - `Only have T-slips?` Start with `1A) Slips and Source Records`. For many users, that may be enough.
         - `Have income not already shown on slips?` Review `2) Income and Investment`.
         - `Have RRSP, FHSA, moving expenses, or other deductions?` Review `3) Deductions`.
-        - `Have donations, medical expenses, tuition carryforwards, dependants, or foreign tax situations?` Review `4) Credits, Carryforwards, and Special Cases`.
+        - `Have donations, medical expenses, spouse or dependant credits, tuition carryforwards, or foreign tax situations?` Review `4) Credits, Carryforwards, and Special Cases`.
         - `Made instalments or other tax payments outside your slips?` Review `5) Payments and Withholdings`.
         """
     )
@@ -3800,10 +3800,10 @@ with st.expander("4) Credits, Carryforwards, and Special Cases (Optional)", expa
             ].sum()
         )
     spouse_amount_claim = number_input(
-        "Spouse / Common-Law Claim Amount",
+        "Optional Manual Spouse / Common-Law Claim Amount",
         "spouse_amount_claim",
         100.0,
-        "Enter the claim amount base, not the credit itself.",
+        "Leave at 0 to use the app's auto estimate. Enter the claim amount base only if you are overriding it manually.",
     )
     eligible_dependant_claim = number_input(
         "Eligible Dependant Claim Amount",
