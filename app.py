@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import streamlit as st
@@ -11,6 +12,38 @@ from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
+from guidance import (
+    CompletionFlag,
+    GuidanceItem,
+    ScreeningInputs,
+    SectionProgress,
+    build_eligibility_guidance,
+    build_completion_flags,
+    build_screening_inputs,
+    build_section_progress,
+    build_suggestions,
+    infer_screening_inputs_from_return_data,
+    split_guidance_by_priority,
+    SuggestionItem,
+)
+from diagnostics import (
+    DiagnosticItem,
+    build_filing_readiness_df,
+    build_results_quick_notes,
+    collect_diagnostics,
+    collect_postcalc_diagnostics,
+    render_diagnostics_panel,
+)
+from eligibility import (
+    build_postcalc_rules_diagnostics,
+    build_rules_diagnostics,
+    EligibilityContext,
+    EligibilityDecision,
+    EligibilityRuleResult,
+    build_eligibility_context,
+    build_eligibility_decision,
+    evaluate_eligibility_rules,
+)
 from tax_config import AVAILABLE_PROVINCES, AVAILABLE_TAX_YEARS, PROVINCES, TAX_CONFIGS
 from tax_engine import calculate_personal_tax_return
 from tax_engine.constants import FEDERAL_MEDICAL_THRESHOLDS
@@ -879,157 +912,6 @@ def build_missing_support_df(result: dict, province: str, province_name: str) ->
     return pd.DataFrame(rows)
 
 
-def build_filing_readiness_df(
-    result: dict,
-    diagnostics: list[tuple[str, str, str]],
-    postcalc_diagnostics: list[tuple[str, str, str]],
-    province: str,
-    province_name: str,
-) -> pd.DataFrame:
-    combined_messages = " ".join(message.lower() for _, _, message in diagnostics + postcalc_diagnostics)
-    rows: list[dict[str, str]] = []
-
-    def add(status: str, area: str, checklist_item: str, detail: str) -> None:
-        rows.append(
-            {
-                "Status": status,
-                "Area": area,
-                "Checklist Item": checklist_item,
-                "Detail": detail,
-            }
-        )
-
-    if result.get("line_10100", 0.0) > 0:
-        add(
-            "Ready" if result.get("income_tax_withheld", 0.0) > 0 else "Review",
-            "Employment",
-            "Employment slips entered",
-            "Employment income is present. Confirm T4 slip amounts and withholding have been matched before filing.",
-        )
-
-    if result.get("line_pension_income", 0.0) > 0 or result.get("line_other_income", 0.0) > 0:
-        status = "Review" if "duplicate" in combined_messages else "Ready"
-        add(
-            status,
-            "Pension / Other income",
-            "Other-slip income reviewed",
-            "Pension or other income is included. Check T4A/T3/T4PS support and confirm no overlap with manual inputs.",
-        )
-
-    if result.get("line_rental_income", 0.0) != 0:
-        add(
-            "Review",
-            "T776",
-            "Rental support assembled",
-            "Rental activity is part of the return. Review gross rents, expenses, and CCA support before treating the estimate as filing-ready.",
-        )
-
-    if result.get("line_taxable_capital_gains", 0.0) > 0 or result.get("net_capital_loss_carryforward", 0.0) > 0:
-        add(
-            "Review",
-            "Schedule 3",
-            "Capital property records reviewed",
-            "Capital gains and/or net capital loss carryforwards affect line 12700. Confirm proceeds, ACB, outlays, and carryforward support.",
-        )
-
-    if result.get("schedule11_total_claim_used", 0.0) > 0:
-        add(
-            "Ready" if result.get("schedule11_current_year_tuition_available", 0.0) > 0 else "Review",
-            "Schedule 11",
-            "Tuition support available",
-            "Tuition was claimed. Confirm T2202 support and any transfer / carryforward amounts used.",
-        )
-
-    if result.get("federal_foreign_tax_credit", 0.0) > 0 or result.get("provincial_foreign_tax_credit", 0.0) > 0:
-        foreign_status = (
-            "Review"
-            if result.get("t2209_net_income_override", 0.0) > 0
-            or result.get("t2209_basic_federal_tax_override", 0.0) > 0
-            or result.get("t2036_provincial_tax_otherwise_payable_override", 0.0) > 0
-            else "Ready"
-        )
-        add(
-            foreign_status,
-            "T2209 / T2036",
-            "Foreign tax credit support reviewed",
-            "Foreign tax credits are being claimed. Confirm foreign-income support and whether any worksheet overrides were intentional.",
-        )
-
-    if result.get("schedule9_total_regular_donations_claimed", 0.0) > 0 or result.get("schedule9_unlimited_gifts_claimed", 0.0) > 0:
-        add(
-            "Review" if result.get("schedule9_carryforward_claim_requested", 0.0) > result.get("schedule9_carryforward_claim_used", 0.0) else "Ready",
-            "Schedule 9",
-            "Donation support reviewed",
-            "Donations or gifts are claimed. Confirm current-year receipts, carryforward support, and any ecological/cultural gift documentation.",
-        )
-
-    if result.get("effective_spouse_claim", 0.0) > 0 or result.get("effective_eligible_dependant_claim", 0.0) > 0 or result.get("provincial_caregiver_claim_amount", 0.0) > 0:
-        household_status = "Review" if "household" in combined_messages else "Ready"
-        add(
-            household_status,
-            "Household claims",
-            "Household eligibility confirmed",
-            "Spouse, dependant, caregiver, or related household claims are in play. Confirm marital status, support arrangements, and dependant eligibility.",
-        )
-
-    if result.get("refundable_credits", 0.0) > 0:
-        refundable_status = "Review" if "manual" in combined_messages or "override" in combined_messages else "Ready"
-        add(
-            refundable_status,
-            "Refundable credits",
-            "Refundable-credit support reviewed",
-            "Refundable credits affect the outcome. Review any auto-estimated or manually overridden refundable items before treating the result as filing-ready.",
-        )
-
-    if result.get("provincial_special_refundable_credits", 0.0) > 0:
-        add(
-            "Review",
-            f"{province_name} special schedules",
-            "Province-specific refundable schedule checked",
-            f"{province_name} special refundable credits are included. Confirm the relevant provincial schedule support before filing.",
-        )
-
-    if result.get("line_48400_refund", 0.0) > 0:
-        add(
-            "Ready" if result.get("income_tax_withheld", 0.0) > 0 or result.get("refundable_credits", 0.0) > 0 else "Missing",
-            "Outcome",
-            "Refund explanation is supportable",
-            "A refund is showing. Confirm it is explained by withholding, refundable credits, or payroll overpayment refunds.",
-        )
-    elif result.get("line_48500_balance_owing", 0.0) > 0:
-        add(
-            "Ready",
-            "Outcome",
-            "Balance owing is explained",
-            "A balance owing is showing. Confirm instalments, withholding, and deductions were entered completely.",
-        )
-
-    if any(severity == "High" for severity, _, _ in diagnostics):
-        add(
-            "Missing",
-            "Diagnostics",
-            "High-risk pre-calculation issues resolved",
-            "At least one high-risk diagnostic is still present. Review the Pre-Calculation Diagnostics before relying on the return.",
-        )
-    if any(severity == "Warning" for severity, _, _ in postcalc_diagnostics):
-        add(
-            "Review",
-            "Diagnostics",
-            "Post-calculation warnings reviewed",
-            "At least one post-calculation warning is still present. Review refundable-credit and payment-allocation warnings.",
-        )
-
-    if not rows:
-        add(
-            "Review",
-            "General",
-            "Return readiness not yet established",
-            "The app does not yet have enough active return content to assess filing readiness in a meaningful way.",
-        )
-
-    return pd.DataFrame(rows)
-
-
 def build_client_summary_df(result: dict, province_name: str) -> pd.DataFrame:
     rows = [
         {"Line": "10100", "Description": "Employment income", "Amount": result.get("line_10100", 0.0)},
@@ -1695,8 +1577,7 @@ def render_answer_summary_sheet(
     result: dict,
     province_name: str,
     readiness_df: pd.DataFrame,
-    next_best_action: "NextBestAction | None" = None,
-    completion_flags: "list[CompletionFlag] | None" = None,
+    suggestions: "list[SuggestionItem] | None" = None,
 ) -> None:
     ready_count = int((readiness_df["Status"] == "Ready").sum()) if not readiness_df.empty else 0
     review_count = int((readiness_df["Status"] == "Review").sum()) if not readiness_df.empty else 0
@@ -1727,93 +1608,15 @@ def render_answer_summary_sheet(
         4,
     )
     st.caption(f"Filing snapshot: Ready {ready_count}, Review {review_count}, Missing {missing_count}.")
-    suggestion_lines: list[tuple[str, str]] = []
-    if next_best_action is not None:
-        suggestion_lines.append(
-            (
-                next_best_action["label"],
-                f"`Why:` {next_best_action['reason']}  \n`Where to go:` `{next_best_action['where']}`",
-            )
-        )
-    if completion_flags:
-        seen_messages = {next_best_action["reason"]} if next_best_action is not None else set()
-        for flag in completion_flags:
-            if flag["message"] in seen_messages:
-                continue
-            suggestion_lines.append(
-                (
-                    "Review this area",
-                    f"`Why:` {flag['message']}  \n`Where to go:` `{flag['where']}`",
-                )
-            )
-            seen_messages.add(flag["message"])
-    if suggestion_lines:
+    if suggestions:
         with st.container(border=True):
             st.markdown("##### Suggestion")
-            for label, detail in suggestion_lines:
-                st.markdown(f"- [ ] {label}  \n  {detail}")
-    if next_best_action is not None and next_best_action.get("note"):
-        st.caption(next_best_action["note"])
-
-
-class ScreeningInputs(TypedDict):
-    has_spouse: bool
-    has_dependants: bool
-    paid_rent_or_property_tax: bool
-    paid_tuition: bool
-    paid_student_loan_interest: bool
-    had_medical_expenses: bool
-    made_donations: bool
-    had_moving_expenses: bool
-    had_child_care_expenses: bool
-    had_work_expenses: bool
-    had_foreign_income: bool
-    had_investment_income: bool
-    low_income_self_assessed: bool
-    wants_household_help: bool
-    province: str
-    province_name: str
-
-
-class GuidanceItem(TypedDict):
-    id: str
-    priority: Literal["likely", "maybe", "easy_to_miss"]
-    what: str
-    why: str
-    where: str
-    estimated_here: bool
-    confidence: Literal["low", "medium", "high"]
-
-
-class NextBestAction(TypedDict):
-    id: str
-    label: str
-    reason: str
-    where: str
-    priority: Literal["now", "soon", "optional"]
-    note: str | None
-    note: str | None
-
-
-class SectionProgress(TypedDict):
-    section_1_slips: Literal["not_started", "in_progress", "done", "not_applicable"]
-    section_2_income: Literal["not_started", "in_progress", "done", "not_applicable"]
-    section_3_deductions: Literal["not_started", "in_progress", "done", "not_applicable"]
-    section_4_credits: Literal["not_started", "in_progress", "done", "not_applicable"]
-    section_5_payments: Literal["not_started", "in_progress", "done", "not_applicable"]
-    household_reviewed: Literal["not_started", "in_progress", "done", "not_applicable"]
-    foreign_tax_reviewed: Literal["not_started", "in_progress", "done", "not_applicable"]
-    carryforward_reviewed: Literal["not_started", "in_progress", "done", "not_applicable"]
-    refundable_reviewed: Literal["not_started", "in_progress", "done", "not_applicable"]
-    summary_reviewed: Literal["not_started", "in_progress", "done", "not_applicable"]
-
-
-class CompletionFlag(TypedDict):
-    id: str
-    severity: Literal["info", "review", "important"]
-    message: str
-    where: str
-    related_guidance_id: str | None
+            for item in suggestions:
+                st.markdown(
+                    f"- [ ] {item['label']}  \n"
+                    f"  `Why:` {item['reason']}  \n"
+                    f"  `Where to go:` `{item['where']}`"
+                )
 
 
 def render_completion_flags_panel(title: str, flags: list[CompletionFlag]) -> None:
@@ -1834,621 +1637,6 @@ def render_completion_flags_panel(title: str, flags: list[CompletionFlag]) -> No
                 st.warning(line)
             else:
                 st.info(line)
-
-
-def build_screening_inputs(
-    *,
-    province: str,
-    province_name: str,
-    session_state: dict,
-    wizard_totals: dict,
-    raw_inputs: dict,
-) -> ScreeningInputs:
-    def numeric_value(key: str) -> float:
-        return float(raw_inputs.get(key, session_state.get(key, 0.0)) or 0.0)
-
-    def bool_value(key: str) -> bool:
-        return bool(raw_inputs.get(key, session_state.get(key, False)))
-
-    def has_rows(key: str) -> bool:
-        value = session_state.get(key, [])
-        return bool(value)
-
-    inferred_has_spouse = bool_value("spouse_claim_enabled") or bool_value("has_spouse_end_of_year")
-    inferred_has_dependants = (
-        bool_value("eligible_dependant_claim_enabled")
-        or has_rows("additional_dependants")
-        or bool_value("dependant_lived_with_you")
-    )
-    inferred_paid_rent_or_property_tax = (
-        numeric_value("t776_property_taxes") > 0
-        or bool_value("bc_renters_credit_eligible")
-        or bool_value("screen_paid_rent_or_property_tax")
-    )
-    inferred_paid_tuition = (
-        numeric_value("tuition_amount_claim") > 0
-        or numeric_value("student_loan_interest") > 0
-        or has_rows("t2202_wizard")
-        or numeric_value("t2202_tuition_total") > 0
-    )
-    inferred_had_medical = numeric_value("medical_expenses_paid") > 0
-    inferred_donations = numeric_value("charitable_donations") > 0 or numeric_value("donations_eligible_total") > 0
-    inferred_moving = numeric_value("moving_expenses") > 0
-    inferred_child_care = numeric_value("child_care_expenses") > 0
-    inferred_work_expenses = (
-        numeric_value("other_employment_expenses") > 0
-        or numeric_value("rrsp_deduction") > 0
-        or numeric_value("fhsa_deduction") > 0
-        or numeric_value("support_payments_deduction") > 0
-    )
-    inferred_foreign_income = numeric_value("foreign_income") > 0 or numeric_value("foreign_tax_paid") > 0
-    inferred_investment_income = (
-        numeric_value("interest_income") > 0
-        or numeric_value("eligible_dividends") > 0
-        or numeric_value("non_eligible_dividends") > 0
-        or bool(wizard_totals.get("t5", 0.0))
-        or bool(wizard_totals.get("t3", 0.0))
-    )
-
-    return {
-        "has_spouse": bool_value("screen_has_spouse") or inferred_has_spouse,
-        "has_dependants": bool_value("screen_has_dependants") or inferred_has_dependants,
-        "paid_rent_or_property_tax": bool_value("screen_paid_rent_or_property_tax") or inferred_paid_rent_or_property_tax,
-        "paid_tuition": bool_value("screen_paid_tuition_or_student_loan") or inferred_paid_tuition,
-        "paid_student_loan_interest": numeric_value("student_loan_interest") > 0 or bool_value("screen_paid_tuition_or_student_loan"),
-        "had_medical_expenses": bool_value("screen_had_medical_or_donations") or inferred_had_medical,
-        "made_donations": bool_value("screen_had_medical_or_donations") or inferred_donations,
-        "had_moving_expenses": bool_value("screen_had_work_or_moving_costs") or inferred_moving,
-        "had_child_care_expenses": bool_value("screen_had_work_or_moving_costs") or inferred_child_care,
-        "had_work_expenses": bool_value("screen_had_work_or_moving_costs") or inferred_work_expenses,
-        "had_foreign_income": bool_value("screen_had_foreign_or_investment_income") or inferred_foreign_income,
-        "had_investment_income": bool_value("screen_had_foreign_or_investment_income") or inferred_investment_income,
-        "low_income_self_assessed": bool_value("screen_low_income"),
-        "wants_household_help": bool_value("screen_want_household_review"),
-        "province": province,
-        "province_name": province_name,
-    }
-
-
-def build_eligibility_guidance(screening: ScreeningInputs) -> list[GuidanceItem]:
-    items: list[GuidanceItem] = []
-
-    if screening["has_spouse"]:
-        items.append({
-            "id": "spouse_amount",
-            "priority": "likely",
-            "what": "Check the spouse / common-law partner amount.",
-            "why": "This can reduce tax if your spouse or partner had low net income.",
-            "where": "Section 4 -> Household And Dependants",
-            "estimated_here": True,
-            "confidence": "medium",
-        })
-    if screening["has_dependants"] or screening["wants_household_help"]:
-        items.append({
-            "id": "household_dependants",
-            "priority": "likely",
-            "what": "Review eligible dependant, caregiver, disability transfer, and dependant medical rules.",
-            "why": "Household-related claims are easy to miss and can affect both federal and provincial credits.",
-            "where": "Section 4 -> Household And Dependants",
-            "estimated_here": True,
-            "confidence": "medium",
-        })
-    if screening["paid_tuition"] or screening["paid_student_loan_interest"]:
-        items.append({
-            "id": "tuition_and_student",
-            "priority": "likely",
-            "what": "Check tuition, student loan interest, and any tuition carryforward amounts.",
-            "why": "These amounts often create credits now or preserve carryforwards for later years.",
-            "where": "Section 4 -> Common Credits And Claim Amounts or Section 4 -> Carryforwards And Transfers",
-            "estimated_here": True,
-            "confidence": "high",
-        })
-    if screening["had_medical_expenses"] or screening["made_donations"]:
-        items.append({
-            "id": "medical_and_donations",
-            "priority": "likely",
-            "what": "Check medical expenses and charitable donations.",
-            "why": "Even moderate amounts can create useful non-refundable credits.",
-            "where": "Section 4 -> Common Credits And Claim Amounts",
-            "estimated_here": True,
-            "confidence": "high",
-        })
-    if screening["had_work_expenses"] or screening["had_moving_expenses"] or screening["had_child_care_expenses"]:
-        items.append({
-            "id": "deductions_review",
-            "priority": "likely",
-            "what": "Review RRSP, FHSA, moving expenses, child care, support payments, and work-related deductions.",
-            "why": "Deductions reduce income directly, which can also change other credits and benefits.",
-            "where": "Section 3 -> Deductions",
-            "estimated_here": True,
-            "confidence": "high",
-        })
-    if screening["had_foreign_income"] or screening["had_investment_income"]:
-        items.append({
-            "id": "foreign_and_investment",
-            "priority": "likely",
-            "what": "Review foreign income, dividends, investment income, and foreign tax inputs.",
-            "why": "Foreign income, dividends, and investment amounts are easy to misclassify or count twice.",
-            "where": "Section 2 -> Income And Investment and Section 4 -> Foreign Tax And Dividend Credits",
-            "estimated_here": True,
-            "confidence": "medium",
-        })
-    if screening["low_income_self_assessed"]:
-        items.append({
-            "id": "low_income_refundable",
-            "priority": "maybe",
-            "what": "Check whether Canada Workers Benefit or Medical Expense Supplement may apply.",
-            "why": "Lower-income returns often qualify for refundable support that changes the final result.",
-            "where": "Section 4 -> Refundable Credit Manual Amounts (Advanced) and Section 6 -> Summary",
-            "estimated_here": True,
-            "confidence": "medium",
-        })
-        items.append({
-            "id": "gst_hst_credit",
-            "priority": "easy_to_miss",
-            "what": "Make sure you still file if GST/HST credit may matter to you.",
-            "why": "Some benefits are triggered by filing even when no tax is owing.",
-            "where": "Outside This Estimator -> CRA benefit eligibility",
-            "estimated_here": False,
-            "confidence": "medium",
-        })
-    if screening["province"] == "ON" and screening["paid_rent_or_property_tax"]:
-        items.append({
-            "id": "ontario_trillium_benefit",
-            "priority": "easy_to_miss",
-            "what": "Review Ontario Trillium Benefit separately if you paid rent or property tax.",
-            "why": "Housing-related Ontario benefits can matter even when the main tax return looks simple.",
-            "where": "Outside This Estimator -> Ontario benefit eligibility",
-            "estimated_here": False,
-            "confidence": "medium",
-        })
-    elif screening["paid_rent_or_property_tax"]:
-        items.append({
-            "id": "housing_benefits",
-            "priority": "maybe",
-            "what": "Check whether your housing costs affect province-specific benefits.",
-            "why": "Some provinces tie credits or benefits to housing costs, family status, or income level.",
-            "where": f"Section 4 -> Province-Specific Credits And Schedules and Outside This Estimator -> {screening['province_name']} benefit guidance",
-            "estimated_here": False,
-            "confidence": "low",
-        })
-
-    if not items:
-        items.append({
-            "id": "general_follow_up",
-            "priority": "maybe",
-            "what": "Check for deductions and common credits even if you already entered all your slips.",
-            "why": "Many first-time filers miss claimable items simply because they stop after entering slips.",
-            "where": "Section 3 -> Deductions and Section 4 -> Common Credits And Claim Amounts",
-            "estimated_here": True,
-            "confidence": "high",
-        })
-
-    return items
-
-
-def build_section_progress(
-    *,
-    session_state: dict,
-    wizard_totals: dict,
-    raw_inputs: dict,
-    result: dict | None = None,
-) -> SectionProgress:
-    def numeric_value(key: str) -> float:
-        return float(raw_inputs.get(key, session_state.get(key, 0.0)) or 0.0)
-
-    def bool_value(key: str) -> bool:
-        return bool(raw_inputs.get(key, session_state.get(key, False)))
-
-    def has_rows(key: str) -> bool:
-        return bool(session_state.get(key, []))
-
-    def wizard_has_nonzero(key: str, fields: list[str]) -> bool:
-        rows = session_state.get(key, [])
-        if not rows:
-            return False
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            for field in fields:
-                try:
-                    if float(row.get(field, 0.0) or 0.0) > 0:
-                        return True
-                except (TypeError, ValueError):
-                    continue
-        return False
-
-    slips_started = any(has_rows(key) for key in ["t4_wizard", "t4a_wizard", "t5_wizard", "t3_wizard", "t4ps_wizard", "t2202_wizard"])
-    slips_done = slips_started
-    section_2_manual_started = any(
-        numeric_value(key) > 0
-        for key in [
-            "employment_income",
-            "pension_income",
-            "rrsp_rrif_income",
-            "other_income",
-            "interest_income",
-            "eligible_dividends",
-            "non_eligible_dividends",
-            "foreign_income",
-            "foreign_tax_paid",
-        ]
-    )
-    section_2_slip_started = (
-        wizard_has_nonzero("t5_wizard", ["box13_interest", "box15_foreign_income", "box25_eligible_dividends_taxable", "box11_non_eligible_dividends_taxable"])
-        or wizard_has_nonzero("t3_wizard", ["box21_capital_gains", "box26_other_income", "box25_foreign_income", "box50_eligible_dividends_taxable", "box32_non_eligible_dividends_taxable"])
-        or wizard_has_nonzero("t4ps_wizard", ["box25_non_eligible_dividends_taxable", "box31_eligible_dividends_taxable", "box34_capital_gains_or_losses", "box35_other_employment_income", "box37_foreign_non_business_income"])
-    )
-    section_2_started = section_2_manual_started or section_2_slip_started
-    section_2_done = section_2_started and (
-        numeric_value("employment_income") > 0
-        or numeric_value("pension_income") > 0
-        or numeric_value("other_income") > 0
-        or numeric_value("interest_income") > 0
-        or numeric_value("eligible_dividends") > 0
-        or numeric_value("non_eligible_dividends") > 0
-        or section_2_slip_started
-    )
-    section_3_started = any(
-        numeric_value(key) > 0
-        for key in [
-            "rrsp_deduction",
-            "fhsa_deduction",
-            "child_care_expenses",
-            "moving_expenses",
-            "support_payments_deduction",
-            "carrying_charges",
-            "other_employment_expenses",
-            "other_deductions",
-            "net_capital_loss_carryforward",
-            "other_loss_carryforward",
-        ]
-    )
-    section_3_done = section_3_started and (
-        numeric_value("rrsp_deduction") > 0
-        or numeric_value("fhsa_deduction") > 0
-        or numeric_value("child_care_expenses") > 0
-        or numeric_value("moving_expenses") > 0
-        or numeric_value("other_employment_expenses") > 0
-    )
-    section_4_started = any(
-        bool_value(key)
-        for key in [
-            "spouse_claim_enabled",
-            "eligible_dependant_claim_enabled",
-            "screen_has_spouse",
-            "screen_has_dependants",
-            "screen_want_household_review",
-        ]
-    ) or any(
-        numeric_value(key) > 0
-        for key in [
-            "spouse_amount_claim",
-            "student_loan_interest",
-            "medical_expenses_paid",
-            "charitable_donations",
-            "tuition_amount_claim",
-            "foreign_income",
-            "foreign_tax_paid",
-            "canada_workers_benefit",
-            "medical_expense_supplement",
-        ]
-    ) or has_rows("additional_dependants")
-    section_4_done = section_4_started and (
-        numeric_value("student_loan_interest") > 0
-        or numeric_value("medical_expenses_paid") > 0
-        or numeric_value("charitable_donations") > 0
-        or numeric_value("spouse_amount_claim") > 0
-        or numeric_value("eligible_dependant_claim") > 0
-        or numeric_value("foreign_income") > 0
-        or numeric_value("foreign_tax_paid") > 0
-        or has_rows("additional_dependants")
-        or bool_value("spouse_claim_enabled")
-        or bool_value("eligible_dependant_claim_enabled")
-    )
-    section_5_started = any(
-        numeric_value(key) > 0
-        for key in [
-            "income_tax_withheld",
-            "cpp_withheld",
-            "ei_withheld",
-            "installments_paid",
-            "other_payments",
-        ]
-    )
-    section_5_done = section_5_started and (
-        numeric_value("income_tax_withheld") > 0
-        or numeric_value("installments_paid") > 0
-        or numeric_value("other_payments") > 0
-    )
-    household_started = (
-        bool_value("spouse_claim_enabled")
-        or bool_value("eligible_dependant_claim_enabled")
-        or numeric_value("spouse_amount_claim") > 0
-        or numeric_value("eligible_dependant_claim") > 0
-        or numeric_value("spouse_net_income") > 0
-        or has_rows("additional_dependants")
-    )
-    household_done = household_started and (
-        numeric_value("spouse_net_income") > 0
-        or numeric_value("spouse_amount_claim") > 0
-        or numeric_value("eligible_dependant_claim") > 0
-        or has_rows("additional_dependants")
-    )
-    foreign_started = any(
-        numeric_value(key) > 0
-        for key in [
-            "foreign_income",
-            "foreign_tax_paid",
-            "t2209_non_business_tax_paid",
-            "t2209_net_foreign_non_business_income",
-            "t2209_net_income_override",
-            "t2209_basic_federal_tax_override",
-            "t2036_provincial_tax_otherwise_payable_override",
-        ]
-    )
-    foreign_done = foreign_started and (
-        numeric_value("foreign_income") > 0 or numeric_value("foreign_tax_paid") > 0
-    )
-    carryforward_started = has_rows("tuition_carryforwards") or has_rows("donation_carryforwards") or has_rows("provincial_credit_lines")
-    carryforward_done = carryforward_started
-    refundable_started = any(
-        numeric_value(key) > 0
-        for key in [
-            "canada_workers_benefit",
-            "canada_training_credit",
-            "medical_expense_supplement",
-            "other_federal_refundable_credits",
-            "manual_provincial_refundable_credits",
-            "refundable_credits",
-        ]
-    ) or bool_value("cwb_basic_eligible")
-    refundable_done = refundable_started and (
-        numeric_value("canada_workers_benefit") > 0
-        or numeric_value("canada_training_credit") > 0
-        or numeric_value("medical_expense_supplement") > 0
-        or numeric_value("other_federal_refundable_credits") > 0
-        or numeric_value("manual_provincial_refundable_credits") > 0
-        or bool_value("cwb_basic_eligible")
-    )
-
-    def status(started: bool, done: bool = False) -> Literal["not_started", "in_progress", "done", "not_applicable"]:
-        if done:
-            return "done"
-        return "in_progress" if started else "not_started"
-
-    return {
-        "section_1_slips": status(slips_started, slips_done),
-        "section_2_income": status(section_2_started, section_2_done),
-        "section_3_deductions": status(section_3_started, section_3_done),
-        "section_4_credits": status(section_4_started, section_4_done),
-        "section_5_payments": status(section_5_started, section_5_done),
-        "household_reviewed": status(household_started, household_done),
-        "foreign_tax_reviewed": status(foreign_started, foreign_done),
-        "carryforward_reviewed": status(carryforward_started, carryforward_done),
-        "refundable_reviewed": status(refundable_started, refundable_done),
-        "summary_reviewed": "done" if result is not None else "not_started",
-    }
-
-
-def build_completion_flags(
-    *,
-    screening: ScreeningInputs,
-    progress: SectionProgress,
-    wizard_totals: dict,
-    raw_inputs: dict,
-    result: dict | None = None,
-    readiness_df: pd.DataFrame | None = None,
-) -> list[CompletionFlag]:
-    flags: list[CompletionFlag] = []
-
-    def add(
-        flag_id: str,
-        severity: Literal["info", "review", "important"],
-        message: str,
-        where: str,
-        related_guidance_id: str | None,
-    ) -> None:
-        flags.append(
-            {
-                "id": flag_id,
-                "severity": severity,
-                "message": message,
-                "where": where,
-                "related_guidance_id": related_guidance_id,
-            }
-        )
-
-    if screening["has_spouse"] and progress["household_reviewed"] == "not_started":
-        add(
-            "spouse_not_reviewed",
-            "review",
-            "A spouse or partner may be relevant here. If you had a spouse or common-law partner at year end and have not reviewed the spouse amount settings yet, you may still have spouse-related credits or benefit eligibility to check.",
-            "Section 4 -> Household And Dependants",
-            "spouse_amount",
-        )
-    if screening["has_dependants"] and progress["household_reviewed"] == "not_started":
-        add(
-            "dependants_not_reviewed",
-            "review",
-            "Dependants are indicated, but household-related credits do not look reviewed yet.",
-            "Section 4 -> Household And Dependants",
-            "household_dependants",
-        )
-    if (screening["paid_tuition"] or screening["paid_student_loan_interest"]) and progress["carryforward_reviewed"] == "not_started":
-        add(
-            "tuition_not_reviewed",
-            "review",
-            "Tuition or student-loan signals are showing, but tuition claims or carryforwards do not look reviewed yet.",
-            "Section 4 -> Common Credits And Claim Amounts",
-            "tuition_and_student",
-        )
-    if (screening["had_medical_expenses"] or screening["made_donations"]) and progress["section_4_credits"] == "not_started":
-        add(
-            "common_credits_not_reviewed",
-            "review",
-            "Medical expenses or donations are indicated, but section 4 credits do not look reviewed yet.",
-            "Section 4 -> Common Credits And Claim Amounts",
-            "medical_and_donations",
-        )
-    if (screening["had_work_expenses"] or screening["had_moving_expenses"] or screening["had_child_care_expenses"]) and progress["section_3_deductions"] == "not_started":
-        add(
-            "deductions_not_reviewed",
-            "review",
-            "Possible deduction items are indicated, but section 3 does not look reviewed yet.",
-            "Section 3 -> Deductions",
-            "deductions_review",
-        )
-    if (screening["had_foreign_income"] or screening["had_investment_income"]) and progress["section_2_income"] == "not_started":
-        add(
-            "income_not_reviewed",
-            "review",
-            "Investment or foreign-income signals are showing, but section 2 does not look reviewed yet.",
-            "Section 2 -> Income And Investment",
-            "foreign_and_investment",
-        )
-    if screening["had_foreign_income"] and progress["foreign_tax_reviewed"] == "not_started":
-        add(
-            "foreign_tax_not_reviewed",
-            "important",
-            "Foreign-income signals are showing, but foreign-tax inputs do not look reviewed yet.",
-            "Section 4 -> Foreign Tax And Dividend Credits",
-            "foreign_and_investment",
-        )
-    if screening["low_income_self_assessed"] and progress["refundable_reviewed"] == "not_started":
-        add(
-            "refundable_not_reviewed",
-            "info",
-            "Low-income support may matter here, but refundable-credit inputs do not look reviewed yet.",
-            "Section 4 -> Refundable Credit Manual Amounts (Advanced)",
-            "low_income_refundable",
-        )
-    cwb_manual_amount = float(raw_inputs.get("canada_workers_benefit", 0.0) or 0.0)
-    cwb_auto_amount = float(result.get("canada_workers_benefit_auto", 0.0)) if result is not None else 0.0
-    cwb_preview_amount = float(result.get("canada_workers_benefit_preview", cwb_auto_amount)) if result is not None else 0.0
-    cwb_working_income = (
-        float(result.get("line_10100", 0.0)) + float(result.get("line_10400", 0.0))
-        if result is not None
-        else (float(wizard_totals.get("employment_income", 0.0) or 0.0) if wizard_totals else 0.0)
-    )
-    cwb_family_income = float(result.get("canada_workers_benefit_preview_family_income", result.get("canada_workers_benefit_family_income", 0.0))) if result is not None else 0.0
-    cwb_no_basic_amount_above = float(result.get("canada_workers_benefit_preview_no_basic_amount_above", result.get("canada_workers_benefit_no_basic_amount_above", 0.0))) if result is not None else 0.0
-    if (
-        result is not None
-        and cwb_manual_amount == 0.0
-        and not bool(raw_inputs.get("cwb_basic_eligible", False))
-        and progress["refundable_reviewed"] != "done"
-        and cwb_working_income > 3000.0
-        and (
-            cwb_preview_amount > 0.0
-            or (cwb_no_basic_amount_above > 0.0 and cwb_family_income <= cwb_no_basic_amount_above)
-        )
-    ):
-        add(
-            "cwb_may_apply",
-            "review",
-            "Canada Workers Benefit may still be relevant based on the current working-income and family-income range. Review it if you have not checked that section yet.",
-            "Section 4 -> Refundable Credit Manual Amounts (Advanced)",
-            "low_income_refundable",
-        )
-    if result is None and progress["section_1_slips"] == "not_started":
-        add(
-            "slips_not_started",
-            "info",
-            "No slip entries are showing yet. Most users should start with slips before anything else.",
-            "Section 1A -> Slips And Source Records",
-            None,
-        )
-
-    severity_rank = {"important": 0, "review": 1, "info": 2}
-    return sorted(flags, key=lambda item: severity_rank[item["severity"]])
-
-
-def build_next_best_action(
-    *,
-    screening: ScreeningInputs,
-    guidance_items: list[GuidanceItem],
-    progress: SectionProgress | None = None,
-    completion_flags: list[CompletionFlag] | None = None,
-) -> NextBestAction | None:
-    if progress is not None and progress["section_1_slips"] == "not_started":
-        return {
-            "id": "start_with_slips",
-            "label": "Start with your slips.",
-            "reason": "Most returns should begin with T-slips before deductions or credits.",
-            "where": "Section 1A -> Slips And Source Records",
-            "priority": "now",
-            "note": None,
-        }
-    if completion_flags:
-        top_flag = completion_flags[0]
-        return {
-            "id": f"follow_{top_flag['id']}",
-            "label": "Review one likely missing area next.",
-            "reason": top_flag["message"],
-            "where": top_flag["where"],
-            "priority": "now" if top_flag["severity"] in {"important", "review"} else "soon",
-            "note": None,
-        }
-    if (
-        screening["has_spouse"] or screening["has_dependants"] or screening["wants_household_help"]
-    ) and (progress is None or progress["household_reviewed"] != "done"):
-        return {
-            "id": "review_household",
-            "label": "Review household credits next.",
-            "reason": "You indicated a spouse, dependant, or household-credit question that may affect the return.",
-            "where": "Section 4 -> Household And Dependants",
-            "priority": "now",
-            "note": None,
-        }
-    if screening["had_work_expenses"] or screening["had_moving_expenses"] or screening["had_child_care_expenses"]:
-        return {
-            "id": "review_deductions",
-            "label": "Review deductions next.",
-            "reason": "Deductions are one of the most common places where first-time users miss tax savings.",
-            "where": "Section 3 -> Deductions",
-            "priority": "now",
-            "note": None,
-        }
-    if screening["paid_tuition"] or screening["paid_student_loan_interest"] or screening["had_medical_expenses"] or screening["made_donations"]:
-        return {
-            "id": "review_common_credits",
-            "label": "Review common credits next.",
-            "reason": "Tuition, medical expenses, and donations are common items that change the final result.",
-            "where": "Section 4 -> Common Credits And Claim Amounts",
-            "priority": "soon",
-            "note": None,
-        }
-    if screening["had_foreign_income"] or screening["had_investment_income"]:
-        return {
-            "id": "review_income_and_foreign_tax",
-            "label": "Review income and foreign-tax details next.",
-            "reason": "Investment and foreign-income entries are more error-prone and often worth a second look.",
-            "where": "Section 2 -> Income And Investment and Section 4 -> Foreign Tax And Dividend Credits",
-            "priority": "soon",
-            "note": None,
-        }
-    if guidance_items:
-        top_item = guidance_items[0]
-        return {
-            "id": f"follow_{top_item['id']}",
-            "label": "Follow up on the top suggested area.",
-            "reason": top_item["what"],
-            "where": top_item["where"],
-            "priority": "optional",
-            "note": None,
-        }
-    note = None
-    if progress is not None and progress["household_reviewed"] == "done" and screening["has_spouse"]:
-        note = "Household spouse settings have already been reviewed. If the spouse-related amount still looks off, check spouse net income and any support or separation details."
-    return {
-        "id": "review_summary",
-        "label": "Review your summary.",
-        "reason": "Nothing obvious is standing out yet, so the next best step is to confirm the current estimate.",
-        "where": "Section 6 -> Summary",
-        "priority": "optional",
-        "note": note,
-    }
 
 
 def render_tax_newbie_benefits_screener(province: str, province_name: str) -> None:
@@ -2522,10 +1710,34 @@ def render_tax_newbie_benefits_screener(province: str, province_name: str) -> No
             "t5": float(bool(st.session_state.get("t5_wizard", []))),
         }
         raw_input_signals = {
+            "tax_year": 2025,
+            "province": province,
+            "age": st.session_state.get("age", 0.0),
             "spouse_claim_enabled": st.session_state.get("spouse_claim_enabled", False),
             "has_spouse_end_of_year": st.session_state.get("has_spouse_end_of_year", False),
+            "separated_in_year": st.session_state.get("separated_in_year", False),
+            "support_payments_to_spouse": st.session_state.get("support_payments_to_spouse", False),
+            "spouse_infirm": st.session_state.get("spouse_infirm", False),
             "eligible_dependant_claim_enabled": st.session_state.get("eligible_dependant_claim_enabled", False),
             "dependant_lived_with_you": st.session_state.get("dependant_lived_with_you", False),
+            "dependant_relationship": st.session_state.get("dependant_relationship", ""),
+            "dependant_category": st.session_state.get("dependant_category", ""),
+            "paid_child_support_for_dependant": st.session_state.get("paid_child_support_for_dependant", False),
+            "shared_custody_claim_agreement": st.session_state.get("shared_custody_claim_agreement", False),
+            "another_household_member_claims_dependant": st.session_state.get("another_household_member_claims_dependant", False),
+            "another_household_member_claims_caregiver": st.session_state.get("another_household_member_claims_caregiver", False),
+            "another_household_member_claims_disability_transfer": st.session_state.get("another_household_member_claims_disability_transfer", False),
+            "medical_dependant_claim_shared": st.session_state.get("medical_dependant_claim_shared", False),
+            "caregiver_claim_amount": st.session_state.get("ontario_caregiver_amount", 0.0),
+            "caregiver_claim_target": st.session_state.get("caregiver_claim_target", "Auto"),
+            "ontario_disability_transfer": st.session_state.get("ontario_disability_transfer", 0.0),
+            "disability_transfer_source": st.session_state.get("disability_transfer_source", "Auto"),
+            "spouse_disability_transfer_available": st.session_state.get("spouse_disability_transfer_available", False),
+            "spouse_disability_transfer_available_amount": st.session_state.get("spouse_disability_transfer_available_amount", 0.0),
+            "eligible_dependant_infirm": st.session_state.get("eligible_dependant_infirm", False),
+            "dependant_disability_transfer_available": st.session_state.get("dependant_disability_transfer_available", False),
+            "dependant_disability_transfer_available_amount": st.session_state.get("dependant_disability_transfer_available_amount", 0.0),
+            "ontario_medical_dependants": st.session_state.get("ontario_medical_dependants", 0.0),
             "medical_expenses_paid": st.session_state.get("medical_expenses_paid", 0.0),
             "charitable_donations": st.session_state.get("charitable_donations", 0.0),
             "donations_eligible_total": st.session_state.get("donations_eligible_total", 0.0),
@@ -2542,8 +1754,14 @@ def render_tax_newbie_benefits_screener(province: str, province_name: str) -> No
             "non_eligible_dividends": st.session_state.get("non_eligible_dividends", 0.0),
             "student_loan_interest": st.session_state.get("student_loan_interest", 0.0),
             "tuition_amount_claim": st.session_state.get("tuition_amount_claim", 0.0),
+            "schedule11_current_year_tuition_available": st.session_state.get("schedule11_current_year_tuition_available", 0.0),
+            "schedule11_carryforward_available": st.session_state.get("schedule11_carryforward_available", 0.0),
+            "canada_training_credit_limit_available": st.session_state.get("canada_training_credit_limit_available", 0.0),
             "bc_renters_credit_eligible": st.session_state.get("bc_renters_credit_eligible", False),
             "t776_property_taxes": st.session_state.get("t776_property_taxes", 0.0),
+            "cwb_basic_eligible": st.session_state.get("cwb_basic_eligible", False),
+            "cwb_disability_supplement_eligible": st.session_state.get("cwb_disability_supplement_eligible", False),
+            "spouse_cwb_disability_supplement_eligible": st.session_state.get("spouse_cwb_disability_supplement_eligible", False),
         }
 
         screening = build_screening_inputs(
@@ -2553,42 +1771,49 @@ def render_tax_newbie_benefits_screener(province: str, province_name: str) -> No
             wizard_totals=wizard_signal_totals,
             raw_inputs=raw_input_signals,
         )
-        guidance_items = build_eligibility_guidance(screening)
+        eligibility_decision = build_eligibility_decision(
+            tax_year=2025,
+            province=province,
+            age=float(st.session_state.get("age", 0.0) or 0.0),
+            raw_inputs=raw_input_signals,
+            result=st.session_state.get("tax_result"),
+        )
         progress = build_section_progress(
             session_state=st.session_state,
             wizard_totals=wizard_signal_totals,
             raw_inputs=raw_input_signals,
             result=st.session_state.get("tax_result"),
+            eligibility_decision=eligibility_decision,
         )
+        guidance_items = build_eligibility_guidance(screening, eligibility_decision, progress)
         completion_flags = build_completion_flags(
             screening=screening,
             progress=progress,
             wizard_totals=wizard_signal_totals,
             raw_inputs=raw_input_signals,
             result=st.session_state.get("tax_result"),
+            eligibility_decision=eligibility_decision,
         )
         has_calculated_result = st.session_state.get("tax_result") is not None
-        next_best_action = build_next_best_action(
+        suggestions = build_suggestions(
             screening=screening,
             guidance_items=guidance_items,
             progress=progress,
             completion_flags=completion_flags,
         )
 
+        likely_guidance, maybe_guidance, easy_to_miss_guidance = split_guidance_by_priority(guidance_items)
         likely_items = [
             {"what": item["what"], "why": item["why"], "where": f"`{item['where']}`"}
-            for item in guidance_items
-            if item["priority"] == "likely"
+            for item in likely_guidance
         ]
         maybe_items = [
             {"what": item["what"], "why": item["why"], "where": f"`{item['where']}`"}
-            for item in guidance_items
-            if item["priority"] == "maybe"
+            for item in maybe_guidance
         ]
         easy_to_miss_items = [
             {"what": item["what"], "why": item["why"], "where": f"`{item['where']}`"}
-            for item in guidance_items
-            if item["priority"] == "easy_to_miss"
+            for item in easy_to_miss_guidance
         ]
 
         always_check = [
@@ -2596,14 +1821,15 @@ def render_tax_newbie_benefits_screener(province: str, province_name: str) -> No
             "If you made instalments or other payments outside slips, review `5) Payments and Withholdings`.",
         ]
 
-        if next_best_action is not None and not has_calculated_result:
+        if suggestions and not has_calculated_result:
             with st.container(border=True):
-                st.markdown("##### Next Best Step")
-                st.markdown(
-                    f"- [ ] {next_best_action['label']}  \n"
-                    f"  `Why:` {next_best_action['reason']}  \n"
-                    f"  `Where to go:` `{next_best_action['where']}`"
-                )
+                st.markdown("##### Suggestion")
+                for item in suggestions:
+                    st.markdown(
+                        f"- [ ] {item['label']}  \n"
+                        f"  `Why:` {item['reason']}  \n"
+                        f"  `Where to go:` `{item['where']}`"
+                    )
 
         render_screening_list("Likely Worth Checking", likely_items)
         render_screening_list("Maybe Relevant", maybe_items)
@@ -2617,7 +1843,7 @@ def render_tax_newbie_benefits_screener(province: str, province_name: str) -> No
                 flags=completion_flags[:4],
             )
         elif has_calculated_result:
-            st.caption("See `Section 6 -> Summary` for the current next best step and the top review items.")
+            st.caption("See `Section 6 -> Summary` for the current suggestions and top review items.")
 
         st.caption("Good default path for most first-time users: `1A) Slips and Source Records` -> `3) Deductions` -> `4) Credits, Carryforwards, and Special Cases` -> `Summary`.")
         st.markdown("##### Good To Keep In Mind")
@@ -2692,64 +1918,6 @@ def build_report_pack_snapshot_lists(
     return quick_review_items, top_warning_items, top_override_items
 
 
-def build_results_quick_notes(
-    result: dict,
-    readiness_df: pd.DataFrame,
-    diagnostics: list[tuple[str, str, str]],
-    postcalc_diagnostics: list[tuple[str, str, str]],
-    reconciliation_df: pd.DataFrame | None = None,
-    assumptions_df: pd.DataFrame | None = None,
-) -> tuple[list[str], list[str], list[str]]:
-    quick_review_items: list[str] = []
-    top_warning_items: list[str] = []
-    top_override_items: list[str] = []
-
-    if result.get("line_48400_refund", 0.0) > 0:
-        quick_review_items.append(
-            f"Estimated refund: {format_currency(result.get('line_48400_refund', 0.0))}."
-        )
-    elif result.get("line_48500_balance_owing", 0.0) > 0:
-        quick_review_items.append(
-            f"Estimated balance owing: {format_currency(result.get('line_48500_balance_owing', 0.0))}."
-        )
-    else:
-        quick_review_items.append("The estimate is currently close to break-even.")
-
-    ready_count = int((readiness_df["Status"] == "Ready").sum()) if not readiness_df.empty else 0
-    review_count = int((readiness_df["Status"] == "Review").sum()) if not readiness_df.empty else 0
-    missing_count = int((readiness_df["Status"] == "Missing").sum()) if not readiness_df.empty else 0
-    quick_review_items.append(
-        f"Filing-readiness snapshot: Ready {ready_count}, Review {review_count}, Missing {missing_count}."
-    )
-
-    if not readiness_df.empty:
-        flagged_rows = readiness_df[readiness_df["Status"].astype(str) != "Ready"].head(3)
-        for _, row in flagged_rows.iterrows():
-            item = f'{row["Status"]}: {row["Checklist Item"]}'
-            quick_review_items.append(item)
-            if len(top_warning_items) < 3:
-                top_warning_items.append(item)
-
-    for severity, category, message in (diagnostics or [])[:2]:
-        top_warning_items.append(f"{severity} - {category}: {message}")
-    for severity, category, message in (postcalc_diagnostics or [])[:2]:
-        top_warning_items.append(f"{severity} - {category}: {message}")
-
-    if assumptions_df is not None and not assumptions_df.empty:
-        flagged_overrides = assumptions_df[
-            assumptions_df["Treatment"].astype(str).str.contains("Manual Override|Cap Applied", case=False, regex=True)
-        ]
-        for _, row in flagged_overrides.head(3).iterrows():
-            top_override_items.append(f'{row["Item"]} ({row["Treatment"]})')
-
-    if reconciliation_df is not None and not reconciliation_df.empty:
-        flagged_reconciliation = reconciliation_df[reconciliation_df["Status"].astype(str) == "Review difference"]
-        for _, row in flagged_reconciliation.head(2).iterrows():
-            top_warning_items.append(f'{row["Area"]}: review the difference shown in input checks.')
-
-    return quick_review_items[:6], top_warning_items[:4], top_override_items[:3]
-
-
 def build_reconciliation_card_html(row: pd.Series, style: dict[str, str]) -> str:
     return f"""
     <div style="border:1px solid #2a2f3a;border-radius:12px;padding:12px 14px;margin:8px 0;background:#111827;">
@@ -2772,42 +1940,6 @@ def build_reconciliation_card_html(row: pd.Series, style: dict[str, str]) -> str
 def render_breakdown_lines(items: list[tuple[str, float]]) -> None:
     for label, value in items:
         st.write(f"{label}: {format_currency(value)}")
-
-def render_diagnostics_panel(checks: list[tuple[str, str, str]]) -> None:
-    severity_styles = {
-        "High": {"bg": "#7f1d1d", "fg": "#fecaca"},
-        "Warning": {"bg": "#78350f", "fg": "#fde68a"},
-        "Info": {"bg": "#1e3a8a", "fg": "#bfdbfe"},
-    }
-    severity_counts = {
-        "High": sum(1 for severity, _, _ in checks if severity == "High"),
-        "Warning": sum(1 for severity, _, _ in checks if severity == "Warning"),
-        "Info": sum(1 for severity, _, _ in checks if severity == "Info"),
-    }
-    render_metric_row(
-        [
-            ("High-Risk", float(severity_counts["High"])),
-            ("Warnings", float(severity_counts["Warning"])),
-            ("Info", float(severity_counts["Info"])),
-        ],
-        3,
-        formatter=format_plain_number,
-    )
-    for severity, category, message in checks:
-        style = severity_styles.get(severity, {"bg": "#374151", "fg": "#f3f4f6"})
-        st.markdown(
-            f"""
-            <div style="border:1px solid #2a2f3a;border-radius:12px;padding:12px 14px;margin:8px 0;background:#111827;">
-                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">
-                    <span style="background:{style['bg']};color:{style['fg']};padding:3px 10px;border-radius:999px;font-size:0.8rem;font-weight:600;">{severity}</span>
-                    <span style="color:#d1d5db;font-size:0.85rem;font-weight:600;">{category}</span>
-                </div>
-                <div style="color:#f9fafb;line-height:1.45;">{message}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
 
 def render_assumptions_overrides_panel(df: pd.DataFrame) -> None:
     if df.empty:
@@ -3279,228 +2411,6 @@ def render_household_review_panel(result: dict) -> None:
             f"Additional disability transfer pool: {format_currency(result.get('additional_dependant_disability_transfer_available_total', 0.0))}. "
             f"Additional medical pool: {format_currency(result.get('additional_dependant_medical_claim_total', 0.0))}."
         )
-
-
-def collect_diagnostics(context: dict[str, float | int | bool]) -> list[tuple[str, str, str]]:
-    checks: list[tuple[str, str, str]] = []
-
-    def add(severity: str, category: str, message: str) -> None:
-        checks.append((severity, category, message))
-
-    if context["employment_income_manual"] > 0 and context["t4_income_total"] > 0:
-        add("Warning", "Duplicate input", "Manual employment income and T4 Box 14 income are both entered. Confirm you are not counting the same employment income twice.")
-    if context["pension_income_manual"] > 0 and (context["t4a_pension_total"] > 0 or context["t3_pension_total"] > 0):
-        add("Warning", "Duplicate input", "Manual pension income and slip-based pension income are both entered. Check that line 11500/11600 income is not duplicated.")
-    if context["manual_net_rental_income"] > 0 and context["t776_net_rental_income"] > 0:
-        add("Warning", "Duplicate input", "Manual additional net rental income and T776 property income are both entered. Confirm the manual amount is truly separate.")
-    if context["manual_taxable_capital_gains"] > 0 and context["schedule3_taxable_capital_gains"] > 0:
-        add("Warning", "Duplicate input", "Manual additional taxable capital gains and Schedule 3 gains are both entered. Confirm the manual amount is not already in the Schedule 3 cards.")
-    if context["manual_foreign_income"] > 0 and context["slip_foreign_income_total"] > 0:
-        add("Warning", "Duplicate input", "Manual foreign income and slip-based foreign income are both entered. Confirm the manual amount is only for extra foreign income not on T5/T3/T4PS.")
-    if context["manual_foreign_tax_paid"] > 0 and context["slip_foreign_tax_paid_total"] > 0:
-        add("Warning", "Duplicate input", "Manual foreign tax paid and slip-based foreign tax paid are both entered. Confirm the manual amount is only for extra foreign tax not already on slips.")
-    if context["tuition_amount_claim_override"] > 0 and context["t2202_tuition_total"] > 0:
-        add("Info", "Tuition", "A current-year tuition override is entered while T2202 tuition is also available. This is okay if you are intentionally following Schedule 11 manually.")
-    if context["spouse_claim_enabled"] and context["eligible_dependant_claim_enabled"]:
-        add("High", "Household", "Spouse amount and eligible dependant are both selected. In many cases these cannot both be claimed together.")
-    if context["spouse_claim_enabled"] and not context["has_spouse_end_of_year"]:
-        add("Warning", "Household", "Spouse amount is selected, but 'Had Spouse at Year End' is not checked.")
-    if context["spouse_claim_enabled"] and context["support_payments_to_spouse"]:
-        add("High", "Household", "Spouse amount is selected while support payments to the spouse/common-law partner are indicated.")
-    if context["spouse_claim_enabled"] and context["separated_in_year"]:
-        add("Warning", "Household", "Spouse amount is selected while 'Separated in Year' is checked. Review whether the spouse amount should still be claimed.")
-    if context["spouse_claim_enabled"] and context["has_spouse_end_of_year"] and not context["separated_in_year"] and not context["support_payments_to_spouse"]:
-        add("Info", "Household", "Spouse amount settings have been reviewed. If the final spouse-related amount still looks off, check spouse net income and any support or separation details.")
-    if context["eligible_dependant_claim_enabled"] and not context["dependant_lived_with_you"]:
-        add("Warning", "Household", "Eligible dependant is selected, but 'Dependant Lived With You' is not checked.")
-    if context["eligible_dependant_claim_enabled"] and context["dependant_relationship"] == "Other":
-        add("High", "Household", "Eligible dependant is selected, but the dependant relationship is marked as 'Other'.")
-    if context["eligible_dependant_claim_enabled"] and context["dependant_category"] == "Other":
-        add("High", "Household", "Eligible dependant is selected, but the dependant category is marked as 'Other'.")
-    if context["paid_child_support_for_dependant"] and not context["shared_custody_claim_agreement"] and context["eligible_dependant_claim_enabled"]:
-        add("High", "Household", "Eligible dependant is selected while child support is paid and no shared-custody agreement is indicated.")
-    if context["another_household_member_claims_dependant"] and context["eligible_dependant_claim_enabled"]:
-        add("High", "Household", "Eligible dependant is selected, but another household member is also marked as claiming the dependant.")
-    if context["another_household_member_claims_caregiver"] and context["caregiver_claim_amount"] > 0:
-        add("High", "Household", "A caregiver amount is entered, but another household member is already marked as claiming the caregiver amount.")
-    if context["caregiver_claim_amount"] > 0 and context["caregiver_claim_target"] == "Auto" and context["spouse_infirm"] and context["eligible_dependant_infirm"]:
-        add("Warning", "Household", "Caregiver amount is entered while both spouse and dependant are infirm. Pick a caregiver target to avoid ambiguity.")
-    if context["caregiver_claim_amount"] > 0 and context["eligible_dependant_infirm"] and context["dependant_category"] not in {"Adult child", "Parent/Grandparent", "Other adult relative"}:
-        add("Warning", "Household", "A caregiver amount is entered for an infirm dependant, but the dependant category does not indicate an adult dependant.")
-    if context["caregiver_claim_amount"] > 0 and not (context["spouse_infirm"] or context["eligible_dependant_infirm"] or context["dependant_lived_with_you"]):
-        add("Info", "Household", "A caregiver amount is entered, but no infirm spouse/dependant or dependant living arrangement is indicated.")
-    if context["another_household_member_claims_disability_transfer"] and context["ontario_disability_transfer"] > 0:
-        add("High", "Household", "A disability transfer is entered, but another household member is already marked as claiming the disability transfer.")
-    if context["ontario_disability_transfer"] > 0 and context["disability_transfer_source"] == "Auto" and context["spouse_infirm"] and context["eligible_dependant_infirm"]:
-        add("Warning", "Household", "Disability transfer is entered while both spouse and dependant could qualify. Pick a transfer source to avoid ambiguity.")
-    if context["ontario_disability_transfer"] > 0 and context["spouse_infirm"] and not context["spouse_disability_transfer_available"]:
-        add("Warning", "Household", "A disability transfer is entered for the spouse, but no unused spouse disability transfer is indicated.")
-    if context["ontario_disability_transfer"] > 0 and context["eligible_dependant_infirm"] and not context["dependant_disability_transfer_available"]:
-        add("Warning", "Household", "A disability transfer is entered for a dependant, but no unused dependant disability transfer is indicated.")
-    if context["ontario_disability_transfer"] > context["spouse_disability_transfer_available_amount"] and context["disability_transfer_source"] == "Spouse" and context["spouse_disability_transfer_available_amount"] > 0:
-        add("Info", "Household", "Requested disability transfer exceeds the spouse amount available. The app caps it to the available spouse transfer.")
-    if context["ontario_disability_transfer"] > context["dependant_disability_transfer_available_amount"] and context["disability_transfer_source"] == "Dependant" and context["dependant_disability_transfer_available_amount"] > 0:
-        add("Info", "Household", "Requested disability transfer exceeds the dependant amount available. The app caps it to the available dependant transfer.")
-    if context["ontario_disability_transfer"] > 0 and not (context["spouse_claim_enabled"] or context["eligible_dependant_claim_enabled"] or context["dependant_lived_with_you"]):
-        add("Info", "Household", "A disability transfer is entered, but no qualifying spouse/dependant relationship is indicated.")
-    if context["medical_dependant_claim_shared"] and context["ontario_medical_dependants"] > 0:
-        add("Warning", "Household", "Medical for other dependants is entered while another person is marked as sharing or claiming that dependant medical amount.")
-    if context["ontario_medical_dependants"] > 0 and context["dependant_category"] == "Minor child":
-        add("Info", "Household", "Medical for other dependants is entered while the dependant category is marked as a minor child. Review whether this amount belongs in the dependant-medical section.")
-
-    if context["t4_tax_withheld_total"] > 0 and context["t4_income_total"] == 0:
-        add("High", "Likely missing slip", "T4 income tax deducted is entered, but T4 Box 14 employment income is zero. Review the T4 wizard.")
-    if (context["t4_cpp_total"] > 0 or context["t4_ei_total"] > 0) and context["t4_income_total"] == 0:
-        add("High", "Likely missing slip", "T4 CPP/EI amounts are entered, but T4 employment income is zero. Review the T4 wizard.")
-    if context["t2202_months_total"] > 0 and context["t2202_tuition_total"] == 0:
-        add("Warning", "Likely missing slip", "T2202 months are entered, but eligible tuition is zero. Check T2202 Box 23/26.")
-    if context["income_tax_withheld_total"] > 0 and context["estimated_total_income"] == 0:
-        add("High", "Likely missing income", "Income tax deducted at source is entered, but total income is zero. You may be missing a slip or income amount.")
-
-    if context["tuition_carryforward_claim_requested"] > context["tuition_carryforward_available_total"]:
-        add("Warning", "Carryforward", "Tuition carryforward claimed exceeds the available amount. The app caps the claim, but you should review the carryforward rows.")
-    if context["donation_carryforward_claim_requested"] > context["donation_carryforward_available_total"]:
-        add("Warning", "Carryforward", "Donation carryforward claimed exceeds the available amount. Review the carryforward rows.")
-    if context["schedule9_regular_limit_preview"] < (context["schedule9_current_year_donations_claim_requested"] + context["donation_carryforward_claim_requested"]):
-        add("Info", "Schedule 9", "Total regular donations requested exceed the app's 75% of net income preview limit. The app will cap current-year and carryforward usage in the final Schedule 9 flow.")
-    if context["ecological_cultural_gifts"] > 0:
-        add("Info", "Schedule 9", "Ecological or cultural gifts are entered. The app treats these as outside the normal 75% of net income limit, consistent with CRA guidance.")
-    if context["net_capital_loss_carryforward"] > context["taxable_capital_gains"]:
-        add("Info", "Carryforward", "Requested net capital loss carryforward exceeds current taxable capital gains. The app only uses the amount that can be applied this year.")
-
-    if context["foreign_tax_paid_total"] > 0 and context["foreign_income_total"] == 0:
-        add("High", "Foreign tax", "Foreign tax paid is entered, but foreign income is zero. T2209/T2036 usually need foreign income to support the credit.")
-    if context["t2209_non_business_tax_paid"] > 0 and context["t2209_net_foreign_non_business_income"] == 0:
-        add("High", "Foreign tax", "T2209 tax paid is entered, but T2209 net foreign non-business income is zero.")
-    if context["t2209_net_income_override"] > 0 and context["t2209_net_income_override"] < context["t2209_net_foreign_non_business_income"]:
-        add("Warning", "Foreign tax", "T2209 net income override is lower than foreign non-business income. Review the worksheet override.")
-
-    if context["income_tax_withheld_manual"] > 0 and (context["t4_tax_withheld_total"] > 0 or context["t4a_tax_withheld_total"] > 0):
-        add("Info", "Withholding", "Manual other tax deducted at source and slip-based tax deducted are both entered. This can be correct, but check line 43700 is not duplicated.")
-    if context["t4_box24_total"] > 0 and abs(context["t4_box24_total"] - context["estimator_ei_insurable_earnings"]) > 100.0:
-        add("Info", "Withholding", "T4 Box 24 EI insurable earnings differ materially from the estimator's EI base assumption.")
-    if context["t4_box26_total"] > 0 and abs(context["t4_box26_total"] - context["estimator_cpp_pensionable_earnings"]) > 100.0:
-        add("Info", "Withholding", "T4 Box 26 CPP pensionable earnings differ materially from the estimator's CPP base assumption.")
-
-    if context["canada_workers_benefit_manual"] > 0 and context["canada_workers_benefit_auto"] > 0:
-        add("Info", "Refundable credits", "A manual Canada Workers Benefit override is entered. The app will use your manual amount instead of the automatic estimate.")
-    if context["cwb_basic_eligible"] and context["canada_workers_benefit_auto"] == 0 and context["canada_workers_benefit_manual"] == 0:
-        add("Info", "Refundable credits", "CWB has already been flagged for review. If the amount still looks off, check working income, family-income range, and any Schedule 6 restrictions.")
-    if context["estimated_working_income"] <= 3000 and (context["canada_workers_benefit_manual"] > 0 or context["canada_workers_benefit_auto"] > 0):
-        add("Warning", "Refundable credits", "Canada Workers Benefit is present, but working income is at or below the basic working-income threshold. Review eligibility.")
-    if context["cwb_disability_supplement_eligible"] and context["canada_workers_benefit_auto"] == 0:
-        add("Info", "Refundable credits", "CWB disability supplement eligibility is checked, but the app did not produce an automatic CWB amount. Review working income and adjusted net income inputs.")
-    if context["spouse_cwb_disability_supplement_eligible"] and not context["has_spouse_end_of_year"]:
-        add("Warning", "Refundable credits", "Spouse CWB disability supplement eligibility is checked, but 'Had Spouse at Year End' is not checked.")
-    if context["canada_training_credit_manual"] > 0 and context["canada_training_credit_limit_available"] == 0:
-        add("Warning", "Refundable credits", "A Canada Training Credit override is entered, but the training credit limit available is zero.")
-    if context["canada_training_credit_manual"] > context["canada_training_credit_limit_available"] and context["canada_training_credit_limit_available"] > 0:
-        add("Info", "Refundable credits", "Canada Training Credit override exceeds the limit available entered. Review the training credit worksheet.")
-    if context["medical_expense_supplement_manual"] > 0 and context["medical_expense_supplement_auto"] > 0:
-        add("Info", "Refundable credits", "A manual Medical Expense Supplement override is entered. The app will use your manual amount instead of the automatic estimate.")
-    if context["medical_expense_supplement_manual"] > 0 and context["estimated_working_income"] < 4275:
-        add("Warning", "Refundable credits", "Medical Expense Supplement is entered, but employment income is below the usual earned-income threshold.")
-    if (context["medical_expense_supplement_manual"] > 0 or context["medical_expense_supplement_auto"] > 0) and context["medical_claim_amount"] == 0:
-        add("Warning", "Refundable credits", "Medical Expense Supplement is present, but no medical claim amount is currently available.")
-    if context["cpp_overpayment_refund_auto"] > 0:
-        add("Info", "Refundable credits", "CPP withheld on slips appears higher than the app's employee CPP estimate. A CPP overpayment refund estimate will be added automatically.")
-    if context["ei_overpayment_refund_auto"] > 0:
-        add("Info", "Refundable credits", "EI withheld on slips appears higher than the app's EI estimate. An EI overpayment refund estimate will be added automatically.")
-    if context["cpp_withheld_total"] > 0 and context["estimated_working_income"] == 0:
-        add("Warning", "Refundable credits", "CPP withheld is entered, but employment income is zero. Review whether a T4 employment amount is missing.")
-    if context["ei_withheld_total"] > 0 and context["estimated_working_income"] == 0:
-        add("Warning", "Refundable credits", "EI withheld is entered, but employment income is zero. Review whether a T4 employment amount is missing.")
-    if context["manual_refundable_credits_total"] > 0 and context["provincial_special_refundable_credits"] > 0:
-        add("Info", "Refundable credits", "Manual refundable credits and province-specific refundable schedule credits are both present. Confirm you are not duplicating refundable claims.")
-    if context["manual_refundable_credits_total"] > 0 and context["estimated_total_income"] == 0:
-        add("Warning", "Refundable credits", "Refundable credits are entered while total income is zero. Review whether the refundable claims belong in this return.")
-    if context["province"] == "ON" and context["ontario_seniors_public_transit_expenses"] > 0 and context["age"] < 65:
-        add("Warning", "Provincial refundable credits", "Ontario seniors' public transit expenses are entered, but age is under 65.")
-    if context["province"] == "BC" and context["bc_home_renovation_expenses"] > 0 and not context["bc_home_renovation_eligible"]:
-        add("Info", "Provincial refundable credits", "B.C. home renovation expenses are entered, but the eligibility checkbox is not selected.")
-    if context["province"] == "BC" and context["bc_renters_credit_eligible"] and context["has_spouse_end_of_year"] and context["manual_provincial_refundable_credits"] > 0:
-        add("Info", "Provincial refundable credits", "B.C. renter's credit eligibility is checked and manual provincial refundable credits are also entered. Review for duplication.")
-    if context["province"] == "SK" and context["sk_fertility_treatment_expenses"] > 20000:
-        add("Info", "Provincial refundable credits", "Saskatchewan fertility treatment expenses exceed $20,000. The app caps the refundable credit at the Saskatchewan maximum.")
-    if context["province"] == "PE" and context["pe_volunteer_credit_eligible"] and context["manual_provincial_refundable_credits"] > 0:
-        add("Info", "Provincial refundable credits", "Prince Edward Island volunteer credit eligibility is checked and manual provincial refundable credits are also entered. Review for duplication.")
-
-    return checks
-
-
-def collect_postcalc_diagnostics(result: dict[str, float]) -> list[tuple[str, str, str]]:
-    checks: list[tuple[str, str, str]] = []
-
-    def add(severity: str, category: str, message: str) -> None:
-        checks.append((severity, category, message))
-
-    cwb_manual = result.get("canada_workers_benefit_manual", 0.0)
-    cwb_auto = result.get("canada_workers_benefit_auto", 0.0)
-    cwb_used = result.get("canada_workers_benefit", 0.0)
-    if cwb_manual > 0 and abs(cwb_manual - cwb_auto) > 100.0:
-        add("Info", "Refundable credits", "Manual Canada Workers Benefit override differs materially from the app's auto estimate. Review the CWB worksheet if you entered the amount manually.")
-    if cwb_used == 0 and cwb_auto > 0:
-        add("Info", "Refundable credits", "The app calculated a positive Canada Workers Benefit estimate, but it was not used. Review whether a manual override or another input suppressed it.")
-    if result.get("cwb_disability_supplement_auto", 0.0) > 0:
-        add("Info", "Refundable credits", "The final Canada Workers Benefit includes a disability supplement estimate.")
-    if result.get("cwb_disability_supplement_eligible", 0.0) > 0 and result.get("canada_workers_benefit_manual", 0.0) > 0:
-        add("Info", "Refundable credits", "A manual Canada Workers Benefit override is being used while CWB disability supplement eligibility is checked. Review whether the manual total already includes the supplement.")
-
-    training_manual = result.get("canada_training_credit_manual", 0.0)
-    training_auto = result.get("canada_training_credit_auto", 0.0)
-    training_limit = result.get("canada_training_credit_limit_available", 0.0)
-    if training_manual > 0 and training_limit > 0 and training_manual > training_limit:
-        add("Warning", "Refundable credits", "Manual Canada Training Credit exceeds the training credit limit available entered. The app used the manual override, so review the Schedule 11 / training-credit worksheet.")
-    if training_auto == 0 and training_limit > 0 and result.get("schedule11_current_year_claim_used", 0.0) == 0:
-        add("Info", "Refundable credits", "A training credit limit is available, but no current-year tuition/training claim was used. The automatic Canada Training Credit therefore stayed at zero.")
-
-    medical_manual = result.get("medical_expense_supplement_manual", 0.0)
-    medical_auto = result.get("medical_expense_supplement_auto", 0.0)
-    if medical_manual > 0 and abs(medical_manual - medical_auto) > 100.0:
-        add("Info", "Refundable credits", "Manual Medical Expense Supplement override differs materially from the app's auto estimate. Review the supplement worksheet if you entered it manually.")
-    if medical_auto == 0 and result.get("medical_expense_supplement", 0.0) == 0 and result.get("federal_medical_claim", 0.0) > 0:
-        add("Info", "Refundable credits", "A federal medical claim exists, but no Medical Expense Supplement was produced. This can be correct if income thresholds are not met.")
-
-    cpp_refund = result.get("cpp_overpayment_refund", 0.0)
-    ei_refund = result.get("ei_overpayment_refund", 0.0)
-    if cpp_refund > 0:
-        add("Info", "Payroll refund", "CPP withheld on slips is above the app's employee CPP estimate, so a CPP overpayment refund estimate was included.")
-    if ei_refund > 0:
-        add("Info", "Payroll refund", "EI withheld on slips is above the app's EI estimate, so an EI overpayment refund estimate was included.")
-
-    refundable_total = result.get("refundable_credits", 0.0)
-    total_payable = result.get("total_payable", 0.0)
-    total_payments = result.get("total_payments", 0.0)
-    income_tax_withheld = result.get("income_tax_withheld", 0.0)
-    refund_amount = result.get("line_48400_refund", 0.0)
-    if refundable_total > total_payable and total_payable > 0:
-        add("Info", "Refundable credits", "Total refundable credits exceed total payable. This can be valid, but the refund result is now being driven mainly by refundable items.")
-    if refund_amount > 0 and refundable_total > 0 and refundable_total >= max(1.0, total_payments * 0.5):
-        add("Info", "Refundable credits", "More than half of the refund/payout is being driven by refundable credits. Review override inputs and provincial refundable schedules carefully.")
-    if income_tax_withheld == 0 and refundable_total > 0 and refund_amount > 0:
-        add("Info", "Refundable credits", "The return shows a refund even though no income tax was withheld, which means the result is being driven by refundable credits only.")
-
-    if result.get("manual_provincial_refundable_credits", 0.0) > 0 and result.get("provincial_special_refundable_credits", 0.0) > 0:
-        add("Info", "Refundable credits", "Manual provincial refundable credits and built-in provincial refundable schedules are both present in the final result. Check that the same provincial credit was not counted twice.")
-    if result.get("ontario_seniors_public_transit_expenses", 0.0) > 0 and result.get("ontario_seniors_transit_credit", 0.0) == 0:
-        add("Info", "Provincial refundable credits", "Ontario seniors' public transit expenses were entered, but no Ontario seniors' transit credit was produced. This can be correct if the age requirement is not met.")
-    if result.get("bc_renters_credit_eligible", 0.0) > 0 and result.get("bc_renters_credit", 0.0) == 0:
-        add("Info", "Provincial refundable credits", "B.C. renter's credit eligibility is checked, but no B.C. renter's credit was produced. Review adjusted family net income and renter eligibility.")
-    if result.get("bc_home_renovation_expenses", 0.0) > 0 and result.get("bc_home_renovation_credit", 0.0) == 0:
-        add("Info", "Provincial refundable credits", "B.C. home renovation expenses were entered, but no B.C. home renovation credit was produced. Review the eligibility checkbox.")
-    if result.get("sk_fertility_treatment_expenses", 0.0) > 0 and result.get("sk_fertility_credit", 0.0) == 0:
-        add("Info", "Provincial refundable credits", "Saskatchewan fertility treatment expenses were entered, but no Saskatchewan fertility credit was produced. Review province selection and eligible-expense entry.")
-    if result.get("pe_volunteer_credit_eligible", 0.0) > 0 and result.get("pe_volunteer_credit", 0.0) == 0:
-        add("Info", "Provincial refundable credits", "P.E.I. volunteer credit eligibility is checked, but no P.E.I. volunteer credit was produced. Review the PE428 volunteer-credit input.")
-
-    if result.get("schedule9_carryforward_claim_requested", 0.0) > result.get("schedule9_carryforward_claim_used", 0.0):
-        add("Info", "Schedule 9", "Donation carryforward requested exceeds the amount used in the final Schedule 9 flow. The app capped the carryforward claim to the available amount.")
-    if result.get("donation_high_rate_portion", 0.0) == 0 and result.get("schedule9_total_regular_donations_claimed", 0.0) > 200 and result.get("taxable_income", 0.0) > 0:
-        add("Info", "Schedule 9", "Donations above $200 were claimed, but no high-rate donation portion was produced. This can be correct if taxable income did not exceed the federal high-rate threshold.")
-    if result.get("schedule9_unlimited_gifts_claimed", 0.0) > 0:
-        add("Info", "Schedule 9", "Cultural or ecological gifts were included outside the regular 75% donation limit. Review line 34200 support if you are matching a CRA worksheet manually.")
-
-    return checks
 
 
 def empty_rows(columns: list[str], rows: int = 3) -> list[dict]:
@@ -4087,13 +2997,38 @@ def build_special_schedule_df(result: dict, province_code: str) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-st.set_page_config(page_title=META_TITLE, page_icon="📱")
+st.set_page_config(page_title=META_TITLE, page_icon="📱", layout="wide")
 inject_meta_tags()
 
-st.title("Advanced Canadian Personal Tax Estimator")
-st.caption(
-    "Built for broader personal-return scenarios. It now supports employment, investment and rental "
-    "income, plus common deductions, credits, and refund or balance owing estimates."
+st.markdown(
+    """
+    <style>
+    .block-container {
+        max-width: 1080px;
+        padding-top: 1.5rem;
+        padding-left: 2rem;
+        padding-right: 2rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    f"""
+    <div style="margin:0 0 -0.9rem 0;">
+        <img src="data:image/png;base64,{base64.b64encode(Path(__file__).with_name("contexta_logo.png").read_bytes()).decode()}" alt="Contexta logo" style="width:144px;display:block;margin:0;" />
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+st.markdown(
+    """
+    <h1 title="Built for broader personal-return scenarios. It now supports employment, investment, rental income, common deductions, credits, and refund or balance owing estimates." style="margin:0;">
+        Advanced Canadian Personal Tax Estimator
+    </h1>
+    """,
+    unsafe_allow_html=True,
 )
 st.info(
     "Current scope: broad federal coverage across Canada, with deeper provincial handling for Ontario and British Columbia. "
@@ -5540,6 +4475,9 @@ diagnostics = collect_diagnostics(
         "taxable_capital_gains": taxable_capital_gains,
         "estimated_total_income": estimated_total_income,
         "estimated_working_income": employment_income,
+        "estimated_adjusted_net_income_for_cwb": estimated_adjusted_net_income_for_cwb,
+        "estimated_spouse_adjusted_net_income_for_cwb": estimated_spouse_adjusted_net_income_for_cwb,
+        "tax_year": tax_year,
         "province": province,
         "age": age,
         "ontario_seniors_public_transit_expenses": ontario_seniors_public_transit_expenses,
@@ -5581,7 +4519,7 @@ diagnostics = collect_diagnostics(
 
 with st.expander("Pre-Calculation Diagnostics", expanded=bool(diagnostics)):
     if diagnostics:
-        render_diagnostics_panel(diagnostics)
+        render_diagnostics_panel(diagnostics, formatter=format_plain_number)
     else:
         st.caption("No obvious duplication or consistency issues were detected from the current inputs.")
 
@@ -5838,10 +4776,24 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             "t5": float(bool(st.session_state.get("t5_wizard", []))),
         }
         summary_raw_input_signals = {
+            "tax_year": tax_year,
+            "province": province,
+            "age": age,
             "spouse_claim_enabled": st.session_state.get("spouse_claim_enabled", False),
             "has_spouse_end_of_year": st.session_state.get("has_spouse_end_of_year", False),
+            "separated_in_year": st.session_state.get("separated_in_year", False),
+            "support_payments_to_spouse": st.session_state.get("support_payments_to_spouse", False),
+            "spouse_infirm": st.session_state.get("spouse_infirm", False),
             "eligible_dependant_claim_enabled": st.session_state.get("eligible_dependant_claim_enabled", False),
             "dependant_lived_with_you": st.session_state.get("dependant_lived_with_you", False),
+            "dependant_relationship": st.session_state.get("dependant_relationship", ""),
+            "dependant_category": st.session_state.get("dependant_category", ""),
+            "paid_child_support_for_dependant": st.session_state.get("paid_child_support_for_dependant", False),
+            "shared_custody_claim_agreement": st.session_state.get("shared_custody_claim_agreement", False),
+            "another_household_member_claims_dependant": st.session_state.get("another_household_member_claims_dependant", False),
+            "cwb_basic_eligible": st.session_state.get("cwb_basic_eligible", False),
+            "cwb_disability_supplement_eligible": st.session_state.get("cwb_disability_supplement_eligible", False),
+            "spouse_cwb_disability_supplement_eligible": st.session_state.get("spouse_cwb_disability_supplement_eligible", False),
             "medical_expenses_paid": st.session_state.get("medical_expenses_paid", 0.0),
             "charitable_donations": st.session_state.get("charitable_donations", 0.0),
             "donations_eligible_total": st.session_state.get("donations_eligible_total", 0.0),
@@ -5858,6 +4810,9 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             "non_eligible_dividends": st.session_state.get("non_eligible_dividends", 0.0),
             "student_loan_interest": st.session_state.get("student_loan_interest", 0.0),
             "tuition_amount_claim": st.session_state.get("tuition_amount_claim", 0.0),
+            "schedule11_current_year_tuition_available": result.get("schedule11_current_year_tuition_available", 0.0),
+            "schedule11_carryforward_available": result.get("schedule11_carryforward_available", 0.0),
+            "canada_training_credit_limit_available": st.session_state.get("canada_training_credit_limit_available", 0.0),
             "bc_renters_credit_eligible": st.session_state.get("bc_renters_credit_eligible", False),
             "t776_property_taxes": st.session_state.get("t776_property_taxes", 0.0),
             "canada_workers_benefit": st.session_state.get("canada_workers_benefit", 0.0),
@@ -5887,13 +4842,21 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             wizard_totals=summary_wizard_signal_totals,
             raw_inputs=summary_raw_input_signals,
         )
-        summary_guidance_items = build_eligibility_guidance(summary_screening)
+        summary_eligibility_decision = build_eligibility_decision(
+            tax_year=tax_year,
+            province=province,
+            age=float(age or 0.0),
+            raw_inputs=summary_raw_input_signals,
+            result=result,
+        )
         summary_progress = build_section_progress(
             session_state=st.session_state,
             wizard_totals=summary_wizard_signal_totals,
             raw_inputs=summary_raw_input_signals,
             result=result,
+            eligibility_decision=summary_eligibility_decision,
         )
+        summary_guidance_items = build_eligibility_guidance(summary_screening, summary_eligibility_decision, summary_progress)
         summary_completion_flags = build_completion_flags(
             screening=summary_screening,
             progress=summary_progress,
@@ -5901,8 +4864,9 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             raw_inputs=summary_raw_input_signals,
             result=result,
             readiness_df=readiness_df,
+            eligibility_decision=summary_eligibility_decision,
         )
-        summary_next_best_action = build_next_best_action(
+        summary_suggestions = build_suggestions(
             screening=summary_screening,
             guidance_items=summary_guidance_items,
             progress=summary_progress,
@@ -5915,13 +4879,13 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             postcalc_diagnostics=postcalc_diagnostics,
             reconciliation_df=None,
             assumptions_df=None,
+            format_currency=format_currency,
         )
         render_answer_summary_sheet(
             result=result,
             province_name=province_name,
             readiness_df=readiness_df,
-            next_best_action=summary_next_best_action,
-            completion_flags=summary_completion_flags,
+            suggestions=summary_suggestions,
         )
         with st.expander("Client Review Details", expanded=False):
             st.markdown("#### Plain-Language Numbers")
