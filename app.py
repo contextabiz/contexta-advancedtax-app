@@ -13,7 +13,6 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 from guidance import (
-    CompletionFlag,
     GuidanceItem,
     ScreeningInputs,
     SectionProgress,
@@ -23,7 +22,6 @@ from guidance import (
     build_section_progress,
     build_suggestions,
     infer_screening_inputs_from_return_data,
-    split_guidance_by_priority,
     SuggestionItem,
 )
 from diagnostics import (
@@ -742,26 +740,6 @@ def render_answer_summary_sheet(
                 )
 
 
-def render_completion_flags_panel(title: str, flags: list[CompletionFlag]) -> None:
-    if not flags:
-        return
-    severity_labels = {
-        "important": "Important",
-        "review": "Review",
-        "info": "Info",
-    }
-    with st.container(border=True):
-        st.markdown(f"##### {title}")
-        for flag in flags:
-            line = f"{severity_labels[flag['severity']]}: {flag['message']}  \n`Where to go:` `{flag['where']}`"
-            if flag["severity"] == "important":
-                st.error(line)
-            elif flag["severity"] == "review":
-                st.warning(line)
-            else:
-                st.info(line)
-
-
 def render_tax_newbie_benefits_screener(province: str, province_name: str) -> None:
     with st.expander("New To Tax? Benefits And Deduction Screener", expanded=False):
         st.caption("Answer a few quick questions to see which credits, deductions, or benefits might be worth checking. This is only a reminder tool and does not change the estimate by itself.")
@@ -811,22 +789,6 @@ def render_tax_newbie_benefits_screener(province: str, province_name: str) -> No
             value=bool(st.session_state.get("screen_want_household_review", False)),
             key="screen_want_household_review",
         )
-
-        def render_screening_list(title: str, items: list[dict[str, str]]) -> None:
-            if not items:
-                return
-            with st.container(border=True):
-                st.markdown(f"##### {title}")
-                st.markdown(
-                    "\n".join(
-                        (
-                            f"- `What to check:` {item['what']}  \n"
-                            f"  `Why this might matter:` {item['why']}  \n"
-                            f"  `Where to go:` {item['where']}"
-                        )
-                        for item in items
-                    )
-                )
 
         wizard_signal_totals = {
             "t3": float(bool(st.session_state.get("t3_wizard", []))),
@@ -925,20 +887,6 @@ def render_tax_newbie_benefits_screener(province: str, province_name: str) -> No
             completion_flags=completion_flags,
         )
 
-        likely_guidance, maybe_guidance, easy_to_miss_guidance = split_guidance_by_priority(guidance_items)
-        likely_items = [
-            {"what": item["what"], "why": item["why"], "where": f"`{item['where']}`"}
-            for item in likely_guidance
-        ]
-        maybe_items = [
-            {"what": item["what"], "why": item["why"], "where": f"`{item['where']}`"}
-            for item in maybe_guidance
-        ]
-        easy_to_miss_items = [
-            {"what": item["what"], "why": item["why"], "where": f"`{item['where']}`"}
-            for item in easy_to_miss_guidance
-        ]
-
         always_check = [
             "If you only entered slips so far, it is still worth checking section 3 for deductions and section 4 for common credits.",
             "If you made instalments or other payments outside slips, review `5) Payments and Withholdings`.",
@@ -953,19 +901,9 @@ def render_tax_newbie_benefits_screener(province: str, province_name: str) -> No
                         f"  `Why:` {item['reason']}  \n"
                         f"  `Where to go:` `{item['where']}`"
                     )
-
-        render_screening_list("Likely Worth Checking", likely_items)
-        render_screening_list("Maybe Relevant", maybe_items)
-        render_screening_list("Not Estimated Here But Easy To Miss", easy_to_miss_items)
-        if not likely_items and not maybe_items and not easy_to_miss_items:
+        elif not has_calculated_result:
             st.info("Tick any boxes that sound like you, and the app will suggest what to check next.")
-
-        if completion_flags and not has_calculated_result:
-            render_completion_flags_panel(
-                title="Likely Missing Or Not Yet Reviewed",
-                flags=completion_flags[:4],
-            )
-        elif has_calculated_result:
+        if has_calculated_result:
             st.caption("See `Section 6 -> Summary` for the current suggestions and top review items.")
 
         st.caption("Good default path for most first-time users: `1A) Slips and Source Records` -> `3) Deductions` -> `4) Credits, Carryforwards, and Special Cases` -> `Summary`.")
