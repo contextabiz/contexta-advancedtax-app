@@ -639,10 +639,12 @@ def build_report_pack_pdf(
     return buffer.getvalue()
 
 
+from typing import Callable
+
 def render_metric_row(
     items: list[tuple[str, float]],
     columns_count: int | None = None,
-    formatter: callable | None = None,
+    formatter: Callable[[float], str] | None = None,
 ) -> None:
     if not items:
         return
