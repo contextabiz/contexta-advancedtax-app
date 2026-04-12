@@ -1678,17 +1678,13 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.markdown(
-    """
-    <h1 title="Built for broader personal-return scenarios. It now supports employment, investment, rental income, common deductions, credits, and refund or balance owing estimates." style="margin:0;">
-        Advanced Canadian Personal Tax Estimator
-    </h1>
-    """,
-    unsafe_allow_html=True,
-)
-st.info(
-    "Current scope: broad federal coverage across Canada, with deeper provincial handling for Ontario and British Columbia. "
-    "Other provinces use core bracket and personal-credit rules plus any extra provincial amounts you enter."
+
+st.title(
+    "Advanced Canadian Personal Tax Estimator",
+    help=(
+        "Current scope: broad federal coverage across Canada, with deeper provincial handling for Ontario and British Columbia. "
+        "Other provinces use core bracket and personal-credit rules plus any extra provincial amounts you enter."
+    ),
 )
 
 with st.expander("Scope and assumptions", expanded=False):
