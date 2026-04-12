@@ -28,11 +28,25 @@ TEXT_MIN_CHARS = 100
 OCR_ENABLED = True
 
 # Initialize EasyOCR lazily/fail-soft: text layer parsing should still work.
-try:
-    reader = easyocr.Reader(['en'], gpu=False, verbose=False) if OCR_ENABLED else None
-except Exception as e:
-    reader = None
-    print(f"Failed to initialize EasyOCR: {e}")
+reader = None
+reader_init_attempted = False
+
+
+def get_ocr_reader():
+    global reader, reader_init_attempted
+    if not OCR_ENABLED:
+        return None
+    if reader is not None:
+        return reader
+    if reader_init_attempted:
+        return None
+    reader_init_attempted = True
+    try:
+        reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+    except Exception as e:
+        reader = None
+        print(f"Failed to initialize EasyOCR lazily: {e}")
+    return reader
 
 
 # ============================================================================
@@ -1126,13 +1140,14 @@ def extract_text_bboxes(page) -> Tuple[List[BBox], Dict]:
 
 
 def extract_ocr_bboxes(page, dpi: Optional[int] = None) -> Tuple[List[BBox], Dict]:
-    if reader is None:
+    ocr_reader = get_ocr_reader()
+    if ocr_reader is None:
         return [], {"ocr_used": False, "reason": "easyocr_unavailable"}
 
     target_dpi = dpi or OCR_DPI
     pix = page.get_pixmap(dpi=target_dpi, alpha=False)
     img_data = pix.tobytes("png")
-    results = reader.readtext(img_data)
+    results = ocr_reader.readtext(img_data)
     boxes = [BBox.from_ocr(bbox, text, conf, pix.width, pix.height) for bbox, text, conf in results if str(text).strip()]
     return boxes, {
         "ocr_used": True,
@@ -1144,11 +1159,12 @@ def extract_ocr_bboxes(page, dpi: Optional[int] = None) -> Tuple[List[BBox], Dic
 
 
 def extract_ocr_text_from_clip(page, clip_rect, dpi: int) -> List[Tuple[str, float]]:
-    if reader is None:
+    ocr_reader = get_ocr_reader()
+    if ocr_reader is None:
         return []
     pix = page.get_pixmap(dpi=dpi, alpha=False, clip=clip_rect)
     img_data = pix.tobytes("png")
-    results = reader.readtext(img_data)
+    results = ocr_reader.readtext(img_data)
     return [(str(text).strip(), float(conf or 0.0)) for _, text, conf in results if str(text).strip()]
 
 
