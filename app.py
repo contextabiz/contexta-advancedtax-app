@@ -7,25 +7,22 @@ import pandas as pd
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, TypedDict
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
-
+import sys
+import os
+sys.path.append(os.path.dirname(__file__))
+from extraction.slip_parser import parse_pdf_slip
 from guidance import (
-    GuidanceItem,
-    ScreeningInputs,
-    SectionProgress,
     build_eligibility_guidance,
     build_completion_flags,
     build_screening_inputs,
     build_section_progress,
     build_suggestions,
-    infer_screening_inputs_from_return_data,
     SuggestionItem,
 )
 from diagnostics import (
-    DiagnosticItem,
     build_filing_readiness_df,
     build_results_quick_notes,
     collect_diagnostics,
@@ -33,21 +30,12 @@ from diagnostics import (
     render_diagnostics_panel,
 )
 from eligibility import (
-    build_postcalc_rules_diagnostics,
-    build_rules_diagnostics,
-    EligibilityContext,
-    EligibilityDecision,
-    EligibilityRuleResult,
-    build_eligibility_context,
     build_eligibility_decision,
-    evaluate_eligibility_rules,
 )
 from results import (
     build_assumptions_overrides_df,
     build_client_key_drivers_df,
-    build_client_summary_cta,
     build_client_summary_df,
-    build_client_summary_notes,
     build_missing_support_df,
     build_on428_part_c_df,
     build_on428a_lift_df,
@@ -63,7 +51,7 @@ from results import (
     build_t776_df,
     build_federal_net_tax_build_up_df,
 )
-from tax_config import AVAILABLE_PROVINCES, AVAILABLE_TAX_YEARS, PROVINCES, TAX_CONFIGS
+from tax_config import AVAILABLE_TAX_YEARS, PROVINCES, TAX_CONFIGS
 from tax_engine import calculate_personal_tax_return
 from tax_engine.constants import FEDERAL_MEDICAL_THRESHOLDS
 from tax_engine.credits import (
@@ -75,28 +63,20 @@ from tax_engine.credits import (
 )
 from tax_engine.utils import estimate_employee_cpp_ei
 
-META_TITLE = "Canadian Personal Tax Estimator | Advanced Federal & Provincial Tax Calculator"
+META_TITLE = "Tax Review & Optimization | Find Missed Deductions from Your T-Slips"
 META_DESCRIPTION = (
-    "Advanced Canadian personal tax estimator with employment, investment and rental "
-    "income, common deductions, credits, and refund or balance owing estimates."
+    "Upload your T-slips and review your taxes in seconds. Check for missed deductions, credits, and benefits "
+    "before filing your Ontario return."
 )
-OG_TITLE = "Canadian Personal Tax Estimator"
+OG_TITLE = "Review Your Ontario Taxes Before You File | Upload T-Slips Instantly"
 OG_DESCRIPTION = (
-    "Estimate a more complete Canadian personal income tax return with broader CRA-style income, "
-    "deduction, credit, and payment inputs."
+    "Upload your T-slips and review your Ontario tax return in seconds. Check deductions, credits, and "
+    "benefits before filing to avoid overpaying."
 )
 APP_URL = "https://advtax.contexta.biz/"
 OG_IMAGE_URL = "https://advtax.contexta.biz/canadian-income-tax-estimator-og.jpg"
 PROVINCIAL_FORM_CODES = {
-    "AB": "AB428",
-    "BC": "BC428",
-    "MB": "MB428",
-    "NB": "NB428",
-    "NL": "NL428",
-    "NS": "NS428",
     "ON": "ON428",
-    "PE": "PE428",
-    "SK": "SK428",
 }
 
 
@@ -104,15 +84,6 @@ def build_input_signature(data: dict) -> str:
     return hashlib.sha256(
         json.dumps(data, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     ).hexdigest()
-PROVINCIAL_CAREGIVER_HELP = {
-    "AB": "AB428 caregiver amount base. Alberta's 2025 maximum is $12,922 per dependant before applying the 6% credit rate.",
-    "NB": "NB428 caregiver amount base. New Brunswick's 2025 infirm dependant amount is up to $5,839 before applying the 9.4% credit rate.",
-    "NL": "NL428 caregiver/infirm dependant base. Enter the eligible base amount from your worksheet if applicable.",
-    "NS": "NS428 caregiver amount base. Enter the eligible amount from your worksheet if applicable.",
-    "ON": "Ontario caregiver claim amount base if applicable.",
-    "PE": "PE428 infirm dependant amount base. Prince Edward Island's 2025 amount is up to $2,446 before the provincial credit rate.",
-    "SK": "SK428 caregiver amount base. Saskatchewan's 2025 maximum is $13,986 per dependant before the 10.5% credit rate.",
-}
 SLIP_WIZARD_CONFIGS = [
     {
         "tab": "T4",
@@ -237,17 +208,11 @@ SLIP_WIZARD_CONFIGS = [
         "title": "T2202 Form",
         "key": "t2202_wizard",
         "columns": [
-            "box21_months_part_time",
-            "box22_months_full_time",
-            "box23_session_tuition",
             "box24_total_months_part_time",
             "box25_total_months_full_time",
             "box26_total_eligible_tuition",
         ],
         "fields": [
-            {"id": "box21_months_part_time", "label": "Box 21 Eligible Months Part-Time", "step": 1.0},
-            {"id": "box22_months_full_time", "label": "Box 22 Eligible Months Full-Time", "step": 1.0},
-            {"id": "box23_session_tuition", "label": "Box 23 Tuition Fees For This Session", "step": 10.0},
             {"id": "box24_total_months_part_time", "label": "Box 24 Total Months Part-Time", "step": 1.0},
             {"id": "box25_total_months_full_time", "label": "Box 25 Total Months Full-Time", "step": 1.0},
             {"id": "box26_total_eligible_tuition", "label": "Box 26 Total Eligible Tuition Fees", "step": 10.0},
@@ -277,8 +242,8 @@ SLIP_WIZARD_MICROCOPY = {
         "tip": "This slip is less common. If you do not have a T4PS in hand, you can skip this tab.",
     },
     "t2202_wizard": {
-        "should_fill": "Fill this if your school issued a T2202 for tuition. Most students only need the months and total eligible tuition boxes shown on the form.",
-        "tip": "If you are only claiming a carryforward from a prior year and do not have a current-year T2202, you can usually skip this tab.",
+        "should_fill": "Fill this if your school issued a T2202 for tuition. For the current Ontario MVP, focus on the total months and total eligible tuition boxes.",
+        "tip": "Boxes 21-23 are hidden for now because the current calculator only uses the total-month and total-tuition figures.",
     },
 }
 
@@ -694,11 +659,215 @@ def format_plain_number(value: float) -> str:
     return f"{int(value)}" if float(value).is_integer() else f"{value:.2f}"
 
 
+def build_productized_recommendation_cards(
+    *,
+    result: dict,
+    has_spouse: bool,
+    spouse_claim_enabled: bool,
+    spouse_net_income: float,
+    cwb_checked: bool,
+    cwb_effective: bool,
+    paid_rent_or_property_tax: bool,
+    has_dependants: bool,
+) -> list[dict[str, str]]:
+    cards: list[dict[str, str]] = []
+
+    def add_card(title: str, status: str, detail: str, next_step: str) -> None:
+        cards.append(
+            {
+                "title": title,
+                "status": status,
+                "detail": detail,
+                "next_step": next_step,
+            }
+        )
+
+    spouse_amount_used = float(result.get("auto_spouse_amount", 0.0) or 0.0)
+    if spouse_amount_used > 0:
+        add_card(
+            "Spouse Or Common-Law Partner Amount",
+            "Included In Your Estimate",
+            "This tax credit has already been included in your current estimate based on the spouse information entered.",
+            "If any spouse details are wrong, go back to Quick Questions and update the household section.",
+        )
+    elif has_spouse and not spouse_claim_enabled:
+        add_card(
+            "Spouse Or Common-Law Partner Amount",
+            "Needs More Information",
+            "You indicated you had a spouse or common-law partner at year end, but the spouse amount check is not turned on.",
+            "Go back to Quick Questions and turn on spouse amount eligibility if you want us to assess it.",
+        )
+    elif has_spouse and spouse_claim_enabled and spouse_net_income <= 0:
+        add_card(
+            "Spouse Or Common-Law Partner Amount",
+            "Needs More Information",
+            "We cannot confirm this credit yet because spouse net income is missing or still zero.",
+            "Go back to Quick Questions and enter spouse net income to let the estimate assess this claim.",
+        )
+    elif has_spouse:
+        add_card(
+            "Spouse Or Common-Law Partner Amount",
+            "Checked But Not Included",
+            "The estimate reviewed this credit, but it is not currently adding any spouse amount to the result.",
+            "Review the household details again only if your spouse information may have been entered incorrectly.",
+        )
+
+    cwb_used = float(result.get("canada_workers_benefit", 0.0) or 0.0)
+    if cwb_used > 0:
+        add_card(
+            "Canada Workers Benefit (CWB)",
+            "Included In Your Estimate",
+            "Canada Workers Benefit has been included in your current estimate.",
+            "If your working income or household details are wrong, go back to Quick Questions and review the CWB section.",
+        )
+    elif cwb_checked and not cwb_effective:
+        add_card(
+            "Canada Workers Benefit (CWB)",
+            "Needs More Information",
+            "You asked us to check CWB, but the current information does not let the estimate apply it yet.",
+            "Review your household details and working-income-related inputs if you expected CWB to apply.",
+        )
+    elif not cwb_checked:
+        add_card(
+            "Canada Workers Benefit (CWB)",
+            "Needs More Information",
+            "CWB is not included because this check is currently turned off.",
+            "Go back to Quick Questions and turn on the CWB check if you want the estimate to assess it.",
+        )
+    else:
+        add_card(
+            "Canada Workers Benefit (CWB)",
+            "Checked But Not Included",
+            "The estimate checked CWB, but it is not currently adding any amount to the result.",
+            "Review only if you expected a CWB amount based on your work income and household situation.",
+        )
+
+    if paid_rent_or_property_tax:
+        add_card(
+            "Ontario Trillium Benefit (OTB)",
+            "Not Included - Review Separately",
+            "This estimate does not currently include Ontario Trillium Benefit in the refund or balance-owing result.",
+            "Review OTB separately if you paid rent or property tax and may qualify.",
+        )
+
+    if has_dependants:
+        add_card(
+            "Canada Child Benefit (CCB)",
+            "Not Included - Review Separately",
+            "Canada Child Benefit is not calculated inside this estimate.",
+            "Review CCB separately if you have children or dependants and want to confirm benefit eligibility.",
+        )
+
+    add_card(
+        "GST/HST Credit",
+        "Not Included - Review Separately",
+        "GST/HST credit is not included in this estimate and does not change the refund shown here.",
+        "File your return and review GST/HST credit eligibility separately if this benefit may matter to you.",
+    )
+    return cards
+
+
+def render_productized_recommendation_cards(cards: list[dict[str, str]]) -> None:
+    if not cards:
+        return
+    status_style = {
+        "Included In Your Estimate": ("#14532d", "#bbf7d0"),
+        "Checked But Not Included": ("#1e3a8a", "#bfdbfe"),
+        "Not Included - Review Separately": ("#78350f", "#fde68a"),
+        "Needs More Information": ("#7f1d1d", "#fecaca"),
+    }
+    st.markdown("##### Recommended Next Checks")
+    for section_title in [
+        "Included In Your Estimate",
+        "Checked But Not Included",
+        "Not Included - Review Separately",
+        "Needs More Information",
+    ]:
+        section_cards = [card for card in cards if card["status"] == section_title]
+        if not section_cards:
+            continue
+        st.markdown(f"###### {section_title}")
+        badge_bg, badge_fg = status_style.get(section_title, ("#374151", "#f3f4f6"))
+        for card in section_cards:
+            st.markdown(
+                f"""
+                <div style="border:1px solid #2a2f3a;border-radius:12px;padding:14px 16px;margin:10px 0;background:#111827;">
+                    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+                        <span style="background:{badge_bg};color:{badge_fg};padding:3px 10px;border-radius:999px;font-size:0.8rem;font-weight:600;">{card['status']}</span>
+                        <span style="color:#f9fafb;font-weight:700;">{card['title']}</span>
+                    </div>
+                    <div style="color:#d1d5db;line-height:1.55;">
+                        <strong style="color:#f3f4f6;">What this means:</strong> {card['detail']}<br>
+                        <strong style="color:#f3f4f6;">Next step:</strong> {card['next_step']}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def categorize_recommendation_item(item: "SuggestionItem") -> str:
+    where = str(item.get("where", ""))
+    item_id = str(item.get("id", ""))
+    label = str(item.get("label", ""))
+    if "Outside This Estimator" in where or item_id in {"gst_hst_credit", "ontario_trillium_benefit", "housing_benefits"}:
+        return "Benefits To Review Separately"
+    if item.get("priority") == "important" or label in {"Review this area", "Check this item"}:
+        return "Items That Need A Second Look"
+    return "Possible Tax Savings"
+
+
+def render_client_recommendation_cards(suggestions: "list[SuggestionItem] | None" = None) -> None:
+    if not suggestions:
+        return
+    priority_labels = {
+        "important": ("Priority Check", "#7f1d1d", "#fecaca"),
+        "review": ("Worth Reviewing", "#78350f", "#fde68a"),
+        "info": ("Good To Know", "#1e3a8a", "#bfdbfe"),
+        "maybe": ("Optional Check", "#374151", "#f3f4f6"),
+    }
+    grouped_items = {
+        "Possible Tax Savings": [],
+        "Benefits To Review Separately": [],
+        "Items That Need A Second Look": [],
+    }
+    for item in suggestions:
+        grouped_items[categorize_recommendation_item(item)].append(item)
+
+    st.markdown("##### Recommended Next Checks")
+    for section_title in ["Possible Tax Savings", "Benefits To Review Separately", "Items That Need A Second Look"]:
+        section_items = grouped_items[section_title]
+        if not section_items:
+            continue
+        st.markdown(f"###### {section_title}")
+        for item in section_items:
+            badge_label, badge_bg, badge_fg = priority_labels.get(
+                item["priority"],
+                ("Review", "#374151", "#f3f4f6"),
+            )
+            st.markdown(
+                f"""
+                <div style="border:1px solid #2a2f3a;border-radius:12px;padding:14px 16px;margin:10px 0;background:#111827;">
+                    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+                        <span style="background:{badge_bg};color:{badge_fg};padding:3px 10px;border-radius:999px;font-size:0.8rem;font-weight:600;">{badge_label}</span>
+                        <span style="color:#f9fafb;font-weight:700;">{item['label']}</span>
+                    </div>
+                    <div style="color:#d1d5db;line-height:1.55;">
+                        <strong style="color:#f3f4f6;">Why this may matter:</strong> {item['reason']}<br>
+                        <strong style="color:#f3f4f6;">Where to review:</strong> {item['where']}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
 def render_answer_summary_sheet(
     result: dict,
     province_name: str,
     readiness_df: pd.DataFrame,
     suggestions: "list[SuggestionItem] | None" = None,
+    product_cards: list[dict[str, str]] | None = None,
 ) -> None:
     ready_count = int((readiness_df["Status"] == "Ready").sum()) if not readiness_df.empty else 0
     review_count = int((readiness_df["Status"] == "Review").sum()) if not readiness_df.empty else 0
@@ -729,186 +898,12 @@ def render_answer_summary_sheet(
         4,
     )
     st.caption(f"Filing snapshot: Ready {ready_count}, Review {review_count}, Missing {missing_count}.")
-    if suggestions:
+    if product_cards:
         with st.container(border=True):
-            st.markdown("##### Suggestion")
-            for item in suggestions:
-                st.markdown(
-                    f"- [ ] {item['label']}  \n"
-                    f"  `Why:` {item['reason']}  \n"
-                    f"  `Where to go:` `{item['where']}`"
-                )
-
-
-def render_tax_newbie_benefits_screener(province: str, province_name: str) -> None:
-    with st.expander("New To Tax? Benefits And Deduction Screener", expanded=False):
-        st.caption("Answer a few quick questions to see which credits, deductions, or benefits might be worth checking. This is only a reminder tool and does not change the estimate by itself.")
-        screen_col1, screen_col2, screen_col3 = st.columns(3)
-        has_spouse_screen = screen_col1.checkbox(
-            "I have a spouse or common-law partner",
-            value=bool(st.session_state.get("screen_has_spouse", False)),
-            key="screen_has_spouse",
-        )
-        has_dependants_screen = screen_col1.checkbox(
-            "I support a child or other dependant",
-            value=bool(st.session_state.get("screen_has_dependants", False)),
-            key="screen_has_dependants",
-        )
-        paid_rent_or_property_tax_screen = screen_col1.checkbox(
-            "I paid rent or property tax",
-            value=bool(st.session_state.get("screen_paid_rent_or_property_tax", False)),
-            key="screen_paid_rent_or_property_tax",
-        )
-        paid_tuition_or_student_loan_screen = screen_col2.checkbox(
-            "I paid tuition or student loan interest",
-            value=bool(st.session_state.get("screen_paid_tuition_or_student_loan", False)),
-            key="screen_paid_tuition_or_student_loan",
-        )
-        had_medical_or_donations_screen = screen_col2.checkbox(
-            "I had medical expenses or donations",
-            value=bool(st.session_state.get("screen_had_medical_or_donations", False)),
-            key="screen_had_medical_or_donations",
-        )
-        had_work_or_moving_costs_screen = screen_col2.checkbox(
-            "I had work expenses, child care, or moving costs",
-            value=bool(st.session_state.get("screen_had_work_or_moving_costs", False)),
-            key="screen_had_work_or_moving_costs",
-        )
-        had_foreign_or_investment_income_screen = screen_col3.checkbox(
-            "I had foreign income or investment income",
-            value=bool(st.session_state.get("screen_had_foreign_or_investment_income", False)),
-            key="screen_had_foreign_or_investment_income",
-        )
-        low_income_screen = screen_col3.checkbox(
-            "My income is fairly low this year",
-            value=bool(st.session_state.get("screen_low_income", False)),
-            key="screen_low_income",
-        )
-        want_household_review_screen = screen_col3.checkbox(
-            "I am not sure which household credits I can claim",
-            value=bool(st.session_state.get("screen_want_household_review", False)),
-            key="screen_want_household_review",
-        )
-
-        wizard_signal_totals = {
-            "t3": float(bool(st.session_state.get("t3_wizard", []))),
-            "t5": float(bool(st.session_state.get("t5_wizard", []))),
-        }
-        raw_input_signals = {
-            "tax_year": 2025,
-            "province": province,
-            "age": st.session_state.get("age", 0.0),
-            "spouse_claim_enabled": st.session_state.get("spouse_claim_enabled", False),
-            "has_spouse_end_of_year": st.session_state.get("has_spouse_end_of_year", False),
-            "separated_in_year": st.session_state.get("separated_in_year", False),
-            "support_payments_to_spouse": st.session_state.get("support_payments_to_spouse", False),
-            "spouse_infirm": st.session_state.get("spouse_infirm", False),
-            "eligible_dependant_claim_enabled": st.session_state.get("eligible_dependant_claim_enabled", False),
-            "dependant_lived_with_you": st.session_state.get("dependant_lived_with_you", False),
-            "dependant_relationship": st.session_state.get("dependant_relationship", ""),
-            "dependant_category": st.session_state.get("dependant_category", ""),
-            "paid_child_support_for_dependant": st.session_state.get("paid_child_support_for_dependant", False),
-            "shared_custody_claim_agreement": st.session_state.get("shared_custody_claim_agreement", False),
-            "another_household_member_claims_dependant": st.session_state.get("another_household_member_claims_dependant", False),
-            "another_household_member_claims_caregiver": st.session_state.get("another_household_member_claims_caregiver", False),
-            "another_household_member_claims_disability_transfer": st.session_state.get("another_household_member_claims_disability_transfer", False),
-            "medical_dependant_claim_shared": st.session_state.get("medical_dependant_claim_shared", False),
-            "caregiver_claim_amount": st.session_state.get("ontario_caregiver_amount", 0.0),
-            "caregiver_claim_target": st.session_state.get("caregiver_claim_target", "Auto"),
-            "ontario_disability_transfer": st.session_state.get("ontario_disability_transfer", 0.0),
-            "disability_transfer_source": st.session_state.get("disability_transfer_source", "Auto"),
-            "spouse_disability_transfer_available": st.session_state.get("spouse_disability_transfer_available", False),
-            "spouse_disability_transfer_available_amount": st.session_state.get("spouse_disability_transfer_available_amount", 0.0),
-            "eligible_dependant_infirm": st.session_state.get("eligible_dependant_infirm", False),
-            "dependant_disability_transfer_available": st.session_state.get("dependant_disability_transfer_available", False),
-            "dependant_disability_transfer_available_amount": st.session_state.get("dependant_disability_transfer_available_amount", 0.0),
-            "ontario_medical_dependants": st.session_state.get("ontario_medical_dependants", 0.0),
-            "medical_expenses_paid": st.session_state.get("medical_expenses_paid", 0.0),
-            "charitable_donations": st.session_state.get("charitable_donations", 0.0),
-            "donations_eligible_total": st.session_state.get("donations_eligible_total", 0.0),
-            "moving_expenses": st.session_state.get("moving_expenses", 0.0),
-            "child_care_expenses": st.session_state.get("child_care_expenses", 0.0),
-            "other_employment_expenses": st.session_state.get("other_employment_expenses", 0.0),
-            "rrsp_deduction": st.session_state.get("rrsp_deduction", 0.0),
-            "fhsa_deduction": st.session_state.get("fhsa_deduction", 0.0),
-            "support_payments_deduction": st.session_state.get("support_payments_deduction", 0.0),
-            "foreign_income": st.session_state.get("foreign_income", 0.0),
-            "foreign_tax_paid": st.session_state.get("foreign_tax_paid", 0.0),
-            "interest_income": st.session_state.get("interest_income", 0.0),
-            "eligible_dividends": st.session_state.get("eligible_dividends", 0.0),
-            "non_eligible_dividends": st.session_state.get("non_eligible_dividends", 0.0),
-            "student_loan_interest": st.session_state.get("student_loan_interest", 0.0),
-            "tuition_amount_claim": st.session_state.get("tuition_amount_claim", 0.0),
-            "schedule11_current_year_tuition_available": st.session_state.get("schedule11_current_year_tuition_available", 0.0),
-            "schedule11_carryforward_available": st.session_state.get("schedule11_carryforward_available", 0.0),
-            "canada_training_credit_limit_available": st.session_state.get("canada_training_credit_limit_available", 0.0),
-            "bc_renters_credit_eligible": st.session_state.get("bc_renters_credit_eligible", False),
-            "t776_property_taxes": st.session_state.get("t776_property_taxes", 0.0),
-            "cwb_basic_eligible": st.session_state.get("cwb_basic_eligible", False),
-            "cwb_disability_supplement_eligible": st.session_state.get("cwb_disability_supplement_eligible", False),
-            "spouse_cwb_disability_supplement_eligible": st.session_state.get("spouse_cwb_disability_supplement_eligible", False),
-        }
-
-        screening = build_screening_inputs(
-            province=province,
-            province_name=province_name,
-            session_state=st.session_state,
-            wizard_totals=wizard_signal_totals,
-            raw_inputs=raw_input_signals,
-        )
-        eligibility_decision = build_eligibility_decision(
-            tax_year=2025,
-            province=province,
-            age=float(st.session_state.get("age", 0.0) or 0.0),
-            raw_inputs=raw_input_signals,
-            result=st.session_state.get("tax_result"),
-        )
-        progress = build_section_progress(
-            session_state=st.session_state,
-            wizard_totals=wizard_signal_totals,
-            raw_inputs=raw_input_signals,
-            result=st.session_state.get("tax_result"),
-            eligibility_decision=eligibility_decision,
-        )
-        guidance_items = build_eligibility_guidance(screening, eligibility_decision, progress)
-        completion_flags = build_completion_flags(
-            screening=screening,
-            progress=progress,
-            wizard_totals=wizard_signal_totals,
-            raw_inputs=raw_input_signals,
-            result=st.session_state.get("tax_result"),
-            eligibility_decision=eligibility_decision,
-        )
-        has_calculated_result = st.session_state.get("tax_result") is not None
-        suggestions = build_suggestions(
-            screening=screening,
-            guidance_items=guidance_items,
-            progress=progress,
-            completion_flags=completion_flags,
-        )
-
-        always_check = [
-            "If you only entered slips so far, it is still worth checking section 3 for deductions and section 4 for common credits.",
-            "If you made instalments or other payments outside slips, review `5) Payments and Withholdings`.",
-        ]
-
-        if suggestions and not has_calculated_result:
-            with st.container(border=True):
-                st.markdown("##### Suggestion")
-                for item in suggestions:
-                    st.markdown(
-                        f"- [ ] {item['label']}  \n"
-                        f"  `Why:` {item['reason']}  \n"
-                        f"  `Where to go:` `{item['where']}`"
-                    )
-        elif not has_calculated_result:
-            st.info("Tick any boxes that sound like you, and the app will suggest what to check next.")
-        if has_calculated_result:
-            st.caption("See `Section 6 -> Summary` for the current suggestions and top review items.")
-
-        st.caption("Good default path for most first-time users: `1A) Slips and Source Records` -> `3) Deductions` -> `4) Credits, Carryforwards, and Special Cases` -> `Summary`.")
-        st.markdown("##### Good To Keep In Mind")
-        st.markdown("\n".join(f"- {item}" for item in always_check))
+            render_productized_recommendation_cards(product_cards)
+    elif suggestions:
+        with st.container(border=True):
+            render_client_recommendation_cards(suggestions)
 
 
 def build_currency_df(rows: list[dict], currency_columns: list[str]) -> pd.DataFrame:
@@ -1212,17 +1207,13 @@ def render_advanced_technical_details(
                     {"Component": "EI Overpayment Refund Estimate", "Amount": result.get("ei_overpayment_refund", 0.0)},
                     {"Component": "CPP/EI Overpayment Refund Total", "Amount": result.get("payroll_overpayment_refund_total", 0.0)},
                     {"Component": "Other Federal Refundable Credits", "Amount": result.get("other_federal_refundable_credits", 0.0)},
-                    {"Component": f"Other {province_name} Refundable Credits", "Amount": result.get("manual_provincial_refundable_credits", 0.0)},
+                    {"Component": "Other Ontario Refundable Credits", "Amount": result.get("manual_provincial_refundable_credits", 0.0)},
                     {"Component": "Ontario Fertility Credit", "Amount": result.get("ontario_fertility_credit", 0.0)},
                     {"Component": "Ontario Seniors' Transit Credit", "Amount": result.get("ontario_seniors_transit_credit", 0.0)},
-                    {"Component": "B.C. Renter's Credit", "Amount": result.get("bc_renters_credit", 0.0)},
-                    {"Component": "B.C. Home Renovation Credit", "Amount": result.get("bc_home_renovation_credit", 0.0)},
-                    {"Component": "Saskatchewan Fertility Credit", "Amount": result.get("sk_fertility_credit", 0.0)},
-                    {"Component": "P.E.I. Volunteer Credit", "Amount": result.get("pe_volunteer_credit", 0.0)},
                     {"Component": "Other Manual Refundable Credits", "Amount": result.get("other_manual_refundable_credits", 0.0)},
                     {"Component": "Federal Refundable Credits Subtotal", "Amount": result.get("federal_refundable_credits", 0.0)},
                     {"Component": "Manual Refundable Credits Total", "Amount": result.get("manual_refundable_credits_total", 0.0)},
-                    {"Component": "Province Special Refundable Credits", "Amount": result.get("provincial_special_refundable_credits", 0.0)},
+                    {"Component": "Ontario Special Refundable Credits", "Amount": result.get("provincial_special_refundable_credits", 0.0)},
                     {"Component": "Total Refundable Credits Used", "Amount": result.get("refundable_credits", 0.0)},
                 ],
                 ["Amount"],
@@ -1245,7 +1236,7 @@ def render_advanced_technical_details(
                     (f"{province_name} Tax Reduction", result.get("provincial_tax_reduction", 0.0)),
                 ]
             )
-            if province in {"ON", "BC", "AB"}:
+            if province == "ON":
                 provincial_household_rows = build_currency_df(
                     [
                         {"Household Line": "Spouse", "Requested/Manual": result.get("provincial_spouse_claim_manual_component", 0.0), "Auto": result.get("provincial_spouse_claim_auto_component", 0.0), "Used": result.get("provincial_spouse_claim", 0.0)},
@@ -1284,38 +1275,6 @@ def render_advanced_technical_details(
                         ("Ontario LIFT Max Credit", result["lift_max_credit"]),
                         ("Ontario LIFT Reduction Base", result["lift_reduction_base"]),
                         ("Ontario LIFT Credit", result["lift_credit"]),
-                    ]
-                )
-            if province == "BC":
-                render_breakdown_lines(
-                    [
-                        ("B.C. Tax Reduction Maximum", result.get("provincial_tax_reduction_max", 0.0)),
-                        ("B.C. Tax Reduction Base", result.get("provincial_tax_reduction_base", 0.0)),
-                    ]
-                )
-            if province == "AB":
-                render_breakdown_lines([("Alberta Supplemental Tax Credit", result.get("ab_supplemental_tax_credit", 0.0))])
-            if province == "MB":
-                render_breakdown_lines([("MB479 Total Refundable Credits Used", result.get("provincial_special_refundable_credits", 0.0))])
-            if province == "NS":
-                render_breakdown_lines(
-                    [
-                        ("NS479 Volunteer Credit", result.get("ns479_volunteer_credit", 0.0)),
-                        ("NS479 Sports and Arts Credit", result.get("ns479_childrens_sports_arts_credit", 0.0)),
-                    ]
-                )
-            if province == "NB":
-                render_breakdown_lines(
-                    [
-                        ("NB Special Non-Refundable Credits", result.get("nb_special_non_refundable_credits", 0.0)),
-                        ("NB Seniors' Home Renovation Credit", result.get("nb_seniors_home_renovation_credit", 0.0)),
-                    ]
-                )
-            if province == "NL":
-                render_breakdown_lines(
-                    [
-                        ("NL Special Non-Refundable Credits", result.get("nl_special_non_refundable_credits", 0.0)),
-                        ("NL479 Refundable Credits", result.get("nl479_other_refundable_credits", 0.0)),
                     ]
                 )
             render_breakdown_lines(
@@ -1363,14 +1322,11 @@ def render_advanced_technical_details(
                 - `Net income` subtracts deductions such as RRSP, FHSA, RPP, dues, moving expenses, child care, carrying charges, support payments, and CPP deductions.
                 - `Taxable income` equals net income after any loss carryforwards and other carryforward-style deductions used in the return.
                 - Federal and provincial tax are calculated separately using progressive brackets and available credits.
-                - For 2025, federal advanced credits are automated, and Ontario plus British Columbia now have richer province-specific credit logic.
-                - Provincial dividend tax credits are auto-calculated for Ontario and British Columbia, with a manual override available for worksheet differences.
+                - For 2025, the current MVP is tuned for Ontario-first review and Ontario worksheet coverage.
+                - Ontario provincial dividend tax credits and key Ontario refundable credits are auto-estimated where supported by the current inputs.
                 - Foreign tax credit now uses a clearer worksheet path: source foreign income and tax, T2209 federal ratio limit, 15% foreign property cap, T2036 residual provincial credit, and any remaining unclaimed foreign tax.
                 - Tuition now follows a clearer Schedule 11-style flow with current-year T2202 amounts, carryforward availability, claimed amounts, transfer-in amounts, and unused balances shown separately.
                 - Donations now follow a closer Schedule 9 flow, including the high-rate federal portion above the 2025 taxable-income threshold.
-                - British Columbia tax reduction and B.C. donation logic are now estimated from province-specific rules for 2025.
-                - Manitoba MB428-A and MB479, Nova Scotia NS479, New Brunswick NB(S12), Newfoundland and Labrador NL special credits, and Prince Edward Island low-income worksheet views are now surfaced through province-specific schedule sections.
-                - Alberta supplemental tax credit is estimated from the eligible provincial claim-base amounts currently modelled in the app. This is an inference from the AB428 guidance rather than a full worksheet clone.
                 - Ontario LIFT credit is estimated using Schedule ON428-A style thresholds for 2025.
                 - Eligible dependant auto-claims now respect the key restrictions you enter: spouse status, separation, living arrangement, support payments, and household exclusivity.
                 - Refund or balance owing = income tax withheld + instalments + refundable credits + other payments - total income tax payable.
@@ -1378,169 +1334,8 @@ def render_advanced_technical_details(
             )
 
 
-def render_household_review_panel(result: dict) -> None:
-    status_styles = {
-        "Allowed": {"bg": "#14532d", "fg": "#bbf7d0"},
-        "Blocked": {"bg": "#7f1d1d", "fg": "#fecaca"},
-    }
-    household_rows = [
-        {
-            "claim": "Spouse amount",
-            "status": "Allowed" if result.get("household_spouse_allowed", 0.0) else "Blocked",
-            "requested": result.get("manual_spouse_claim", 0.0),
-            "used": result.get("effective_spouse_claim", 0.0),
-            "reason": result.get("household_spouse_reason", ""),
-        },
-        {
-            "claim": "Eligible dependant amount",
-            "status": "Allowed" if result.get("household_eligible_dependant_allowed", 0.0) else "Blocked",
-            "requested": result.get("manual_eligible_dependant_claim", 0.0),
-            "used": result.get("effective_eligible_dependant_claim", 0.0),
-            "reason": result.get("household_eligible_dependant_reason", ""),
-        },
-        {
-            "claim": "Caregiver amount",
-            "status": "Allowed" if result.get("household_caregiver_allowed", 0.0) else "Blocked",
-            "requested": result.get("requested_caregiver_claim", 0.0),
-            "available": result.get("available_caregiver_claim", 0.0),
-            "used": result.get("provincial_caregiver_claim_amount", 0.0),
-            "unused": result.get("unused_caregiver_claim", 0.0),
-            "reason": result.get("household_caregiver_reason", ""),
-        },
-        {
-            "claim": "Disability transfer",
-            "status": "Allowed" if result.get("household_disability_transfer_allowed", 0.0) else "Blocked",
-            "requested": result.get("requested_disability_transfer", 0.0),
-            "available": result.get("available_disability_transfer", 0.0),
-            "used": result.get("household_disability_transfer_used", 0.0),
-            "unused": result.get("unused_disability_transfer", 0.0),
-            "reason": result.get("household_disability_transfer_reason", ""),
-        },
-        {
-            "claim": "Medical for dependants",
-            "status": "Allowed" if result.get("household_medical_dependants_allowed", 0.0) else "Blocked",
-            "requested": result.get("requested_medical_dependants", 0.0),
-            "available": result.get("available_medical_dependants", 0.0),
-            "used": result.get("household_medical_dependants_used", 0.0),
-            "unused": result.get("unused_medical_dependants", 0.0),
-            "reason": result.get("household_medical_dependants_reason", ""),
-        },
-    ]
-    render_metric_row(
-        [
-            ("Allowed", float(sum(1 for row in household_rows if row["status"] == "Allowed"))),
-            ("Blocked", float(sum(1 for row in household_rows if row["status"] == "Blocked"))),
-        ],
-        2,
-    )
-    for row in household_rows:
-        style = status_styles[row["status"]]
-        st.markdown(
-            f"""
-            <div style="border:1px solid #2a2f3a;border-radius:12px;padding:12px 14px;margin:8px 0;background:#111827;">
-                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
-                    <span style="background:{style['bg']};color:{style['fg']};padding:3px 10px;border-radius:999px;font-size:0.8rem;font-weight:600;">{row['status']}</span>
-                    <span style="color:#f9fafb;font-weight:600;">{row['claim']}</span>
-                </div>
-                <div style="color:#d1d5db;line-height:1.5;">
-                    Requested: {format_currency(row['requested'])}<br>
-                    Available: {format_currency(row.get('available', row['requested']))}<br>
-                    Used: {format_currency(row['used'])}<br>
-                    Unused: {format_currency(row.get('unused', 0.0))}<br>
-                    {row['reason']}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    allocation_trace = build_currency_df(
-        [
-            {"Step": "1", "Flow": "Spouse amount", "Requested": result.get("manual_spouse_claim", 0.0), "Used": result.get("effective_spouse_claim", 0.0)},
-            {"Step": "2", "Flow": "Eligible dependant", "Requested": result.get("manual_eligible_dependant_claim", 0.0), "Used": result.get("effective_eligible_dependant_claim", 0.0)},
-            {"Step": "3", "Flow": "Caregiver pool", "Requested": result.get("requested_caregiver_claim", 0.0), "Used": result.get("provincial_caregiver_claim_amount", 0.0)},
-            {"Step": "4", "Flow": "Disability transfer", "Requested": result.get("requested_disability_transfer", 0.0), "Used": result.get("household_disability_transfer_used", 0.0)},
-            {"Step": "5", "Flow": "Dependant medical", "Requested": result.get("requested_medical_dependants", 0.0), "Used": result.get("household_medical_dependants_used", 0.0)},
-        ],
-        ["Requested", "Used"],
-    )
-    st.markdown("#### Household Allocation Trace")
-    st.dataframe(allocation_trace, use_container_width=True, hide_index=True)
-    if result.get("additional_dependant_count", 0.0):
-        st.caption(
-            f"Additional dependants in pool: {int(result.get('additional_dependant_count', 0.0))}. "
-            f"Additional caregiver pool: {format_currency(result.get('additional_dependant_caregiver_claim_total', 0.0))}. "
-            f"Additional disability transfer pool: {format_currency(result.get('additional_dependant_disability_transfer_available_total', 0.0))}. "
-            f"Additional medical pool: {format_currency(result.get('additional_dependant_medical_claim_total', 0.0))}."
-        )
-
-
 def empty_rows(columns: list[str], rows: int = 3) -> list[dict]:
     return [{column: 0.0 for column in columns} for _ in range(rows)]
-
-
-def render_record_card_editor(
-    title: str,
-    card_key: str,
-    fields: list[dict[str, object]],
-    help_text: str | None = None,
-    count_default: int = 1,
-) -> pd.DataFrame:
-    st.markdown(f"#### {title}")
-    if help_text:
-        st.caption(help_text)
-    count = int(
-        st.number_input(
-            f"Number of {title}",
-            min_value=0,
-            step=1,
-            value=int(st.session_state.get(f"{card_key}_count", count_default)),
-            key=f"{card_key}_count",
-        )
-    )
-    records: list[dict[str, float]] = []
-    for index in range(count):
-        with st.container(border=True):
-            st.markdown(f"**{title} #{index + 1}**")
-            cols = st.columns(2)
-            record: dict[str, object] = {}
-            for field_index, field in enumerate(fields):
-                col = cols[field_index % 2]
-                field_id = str(field["id"])
-                field_type = str(field.get("type", "number"))
-                widget_key = f"{card_key}_{index}_{field_id}"
-                if field_type == "text":
-                    record[field_id] = col.text_input(
-                        str(field["label"]),
-                        value=str(st.session_state.get(widget_key, field.get("value", ""))),
-                        key=widget_key,
-                        help=str(field.get("help", "")) if field.get("help") else None,
-                        placeholder=str(field.get("placeholder", "")) if field.get("placeholder") else None,
-                    )
-                elif field_type == "select":
-                    options = list(field.get("options", []))
-                    default_value = st.session_state.get(widget_key, field.get("value", options[0] if options else ""))
-                    default_index = options.index(default_value) if default_value in options else 0
-                    record[field_id] = col.selectbox(
-                        str(field["label"]),
-                        options,
-                        index=default_index,
-                        key=widget_key,
-                        help=str(field.get("help", "")) if field.get("help") else None,
-                    )
-                else:
-                    record[field_id] = float(
-                        col.number_input(
-                            str(field["label"]),
-                            min_value=0.0,
-                            step=float(field.get("step", 100.0)),
-                            value=float(st.session_state.get(widget_key, field.get("value", 0.0))),
-                            key=widget_key,
-                            help=str(field.get("help", "")) if field.get("help") else None,
-                        )
-                    )
-            records.append(record)
-    st.session_state[card_key] = records
-    return pd.DataFrame(records)
 
 
 def render_t_slip_wizard_card(title: str, card_key: str, fields: list[dict[str, object]], count_default: int = 1) -> list[dict[str, float]]:
@@ -1583,15 +1378,496 @@ def render_t_slip_wizard_card(title: str, card_key: str, fields: list[dict[str, 
     return records
 
 
-def render_slip_wizard_tabs(configs: list[dict[str, object]]) -> dict[str, list[dict[str, float]]]:
+def get_state_number(key: str, default: float = 0.0) -> float:
+    return float(st.session_state.get(key, default) or 0.0)
+
+
+def get_state_bool(key: str, default: bool = False) -> bool:
+    return bool(st.session_state.get(key, default))
+
+
+def get_state_text(key: str, default: str = "") -> str:
+    return str(st.session_state.get(key, default) or default)
+
+
+STEP_SCROLL_TARGETS = {
+    "slips": "1-upload-slips",
+    "review_slips": "2-review-slip-values",
+    "questions": "3-quick-questions",
+    "review_return": "4-review-return",
+    "results": "6-results",
+}
+SLIP_TYPE_LABELS = {str(config["key"]): str(config["title"]) for config in SLIP_WIZARD_CONFIGS}
+LOW_CONFIDENCE_THRESHOLD = 0.88
+LOW_CONFIDENCE_FIELD_THRESHOLD = 0.86
+
+
+def render_step_heading(title: str, anchor_id: str) -> None:
+    st.markdown(
+        f"""
+        <h3 id="{anchor_id}" style="margin: 0 0 0.25rem 0; padding: 0;">
+            {title}
+        </h3>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def queue_step_scroll(step_id: str) -> None:
+    st.session_state["pending_scroll_anchor"] = STEP_SCROLL_TARGETS.get(step_id, "")
+
+
+def render_upload_extraction_feedback() -> None:
+    extraction_summary = st.session_state.get("upload_extraction_summary") or {}
+    processed_count = int(extraction_summary.get("processed_count", 0) or 0)
+    recognized_labels = list(extraction_summary.get("recognized_labels", []))
+    unrecognized_files = list(extraction_summary.get("unrecognized_files", []))
+    low_confidence_files = list(extraction_summary.get("low_confidence_files", []))
+    if processed_count <= 0:
+        return
+    st.success("Slip extraction completed. Please review the summary below, then click Next to continue.")
+    summary_rows = [
+        {"Item": "Slips processed", "Value": str(processed_count)},
+        {"Item": "Recognized slip types", "Value": ", ".join(recognized_labels) if recognized_labels else "None"},
+        {"Item": "Needs manual review", "Value": ", ".join(unrecognized_files) if unrecognized_files else "None"},
+        {"Item": "Recognized but should still be checked", "Value": ", ".join(low_confidence_files) if low_confidence_files else "None"},
+    ]
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+    if unrecognized_files:
+        st.warning("Some files could not be matched confidently. Please review those slips manually, or continue later with manual amounts if needed.")
+    if low_confidence_files:
+        st.info("Some recognized slips used OCR fallback or lower-confidence extraction. Please check those values carefully in Review Slip Values.")
+
+
+def parser_review_summary(parser_review: dict | None, fields: list[dict[str, object]]) -> tuple[list[str], str | None]:
+    if not parser_review:
+        return [], "This slip was loaded without parser review details. Please double-check the extracted values."
+    confidence_map = parser_review.get("confidence", {}) or {}
+    flagged_fields = [
+        str(field["label"])
+        for field in fields
+        if confidence_map.get(str(field["id"]), 1.0) < LOW_CONFIDENCE_FIELD_THRESHOLD
+    ]
+    meta = parser_review.get("meta", {}) or {}
+    avg_conf = float(meta.get("avg_confidence", 0.0) or 0.0)
+    fallback_used = bool(meta.get("text_fallback_triggered", False))
+    if flagged_fields:
+        return flagged_fields, None
+    if avg_conf and avg_conf < LOW_CONFIDENCE_THRESHOLD:
+        return [], "This slip was recognized, but the overall extraction confidence was lower than usual. Please double-check the values below."
+    if fallback_used:
+        return [], "This slip used OCR fallback during extraction. Please review the values before continuing."
+    return [], None
+
+
+def build_results_tab_names() -> tuple[list[str], str | None]:
+    tab_names = [
+        "Summary",
+        "Return Details",
+        "Review Checks",
+        "Foreign Tax Credit",
+        "ON428",
+        "Rental Details",
+        "Capital Gains",
+        "Tuition",
+        "Donations",
+        "Scope / Limits",
+        "ON479",
+    ]
+    return tab_names, "ON479"
+
+
+def build_results_summary_signal_inputs(
+    session_state,
+    result: dict,
+    tax_year: int,
+    province: str,
+    age: float | int,
+) -> tuple[dict[str, float], dict[str, object]]:
+    wizard_totals = {
+        "t3": float(bool(session_state.get("t3_wizard", []))),
+        "t5": float(bool(session_state.get("t5_wizard", []))),
+    }
+    raw_inputs = {
+        "tax_year": tax_year,
+        "province": province,
+        "age": age,
+        "spouse_claim_enabled": session_state.get("spouse_claim_enabled", False),
+        "has_spouse_end_of_year": session_state.get("has_spouse_end_of_year", False),
+        "separated_in_year": session_state.get("separated_in_year", False),
+        "support_payments_to_spouse": session_state.get("support_payments_to_spouse", False),
+        "spouse_infirm": session_state.get("spouse_infirm", False),
+        "eligible_dependant_claim_enabled": session_state.get("eligible_dependant_claim_enabled", False),
+        "dependant_lived_with_you": session_state.get("dependant_lived_with_you", False),
+        "dependant_relationship": session_state.get("dependant_relationship", ""),
+        "dependant_category": session_state.get("dependant_category", ""),
+        "paid_child_support_for_dependant": session_state.get("paid_child_support_for_dependant", False),
+        "shared_custody_claim_agreement": session_state.get("shared_custody_claim_agreement", False),
+        "another_household_member_claims_dependant": session_state.get("another_household_member_claims_dependant", False),
+        "cwb_basic_eligible": session_state.get("cwb_basic_eligible", False),
+        "cwb_disability_supplement_eligible": session_state.get("cwb_disability_supplement_eligible", False),
+        "spouse_cwb_disability_supplement_eligible": session_state.get("spouse_cwb_disability_supplement_eligible", False),
+        "medical_expenses_paid": session_state.get("medical_expenses_paid", 0.0),
+        "charitable_donations": session_state.get("charitable_donations", 0.0),
+        "donations_eligible_total": session_state.get("donations_eligible_total", 0.0),
+        "moving_expenses": session_state.get("moving_expenses", 0.0),
+        "child_care_expenses": session_state.get("child_care_expenses", 0.0),
+        "other_employment_expenses": session_state.get("other_employment_expenses", 0.0),
+        "rrsp_deduction": session_state.get("rrsp_deduction", 0.0),
+        "fhsa_deduction": session_state.get("fhsa_deduction", 0.0),
+        "support_payments_deduction": session_state.get("support_payments_deduction", 0.0),
+        "foreign_income": session_state.get("foreign_income", 0.0),
+        "foreign_tax_paid": session_state.get("foreign_tax_paid", 0.0),
+        "interest_income": session_state.get("interest_income", 0.0),
+        "eligible_dividends": session_state.get("eligible_dividends", 0.0),
+        "non_eligible_dividends": session_state.get("non_eligible_dividends", 0.0),
+        "student_loan_interest": session_state.get("student_loan_interest", 0.0),
+        "tuition_amount_claim": session_state.get("tuition_amount_claim", 0.0),
+        "schedule11_current_year_tuition_available": result.get("schedule11_current_year_tuition_available", 0.0),
+        "schedule11_carryforward_available": result.get("schedule11_carryforward_available", 0.0),
+        "canada_training_credit_limit_available": session_state.get("canada_training_credit_limit_available", 0.0),
+        "bc_renters_credit_eligible": session_state.get("bc_renters_credit_eligible", False),
+        "t776_property_taxes": session_state.get("t776_property_taxes", 0.0),
+        "canada_workers_benefit": session_state.get("canada_workers_benefit", 0.0),
+        "canada_training_credit": session_state.get("canada_training_credit", 0.0),
+        "medical_expense_supplement": session_state.get("medical_expense_supplement", 0.0),
+        "other_federal_refundable_credits": session_state.get("other_federal_refundable_credits", 0.0),
+        "manual_provincial_refundable_credits": session_state.get("manual_provincial_refundable_credits", 0.0),
+        "refundable_credits": session_state.get("refundable_credits", 0.0),
+        "spouse_amount_claim": session_state.get("spouse_amount_claim", 0.0),
+        "eligible_dependant_claim": session_state.get("eligible_dependant_claim", 0.0),
+        "spouse_net_income": session_state.get("spouse_net_income", 0.0),
+        "income_tax_withheld": session_state.get("income_tax_withheld", 0.0),
+        "cpp_withheld": session_state.get("cpp_withheld", 0.0),
+        "ei_withheld": session_state.get("ei_withheld", 0.0),
+        "installments_paid": session_state.get("installments_paid", 0.0),
+        "other_payments": session_state.get("other_payments", 0.0),
+        "t2209_non_business_tax_paid": session_state.get("t2209_non_business_tax_paid", 0.0),
+        "t2209_net_foreign_non_business_income": session_state.get("t2209_net_foreign_non_business_income", 0.0),
+        "t2209_net_income_override": session_state.get("t2209_net_income_override", 0.0),
+        "t2209_basic_federal_tax_override": session_state.get("t2209_basic_federal_tax_override", 0.0),
+        "t2036_provincial_tax_otherwise_payable_override": session_state.get("t2036_provincial_tax_otherwise_payable_override", 0.0),
+    }
+    return wizard_totals, raw_inputs
+
+
+def build_results_summary_suggestions(
+    session_state,
+    result: dict,
+    readiness_df: pd.DataFrame,
+    tax_year: int,
+    province: str,
+    province_name: str,
+    age: float | int,
+) -> list[SuggestionItem]:
+    wizard_totals, raw_inputs = build_results_summary_signal_inputs(
+        session_state=session_state,
+        result=result,
+        tax_year=tax_year,
+        province=province,
+        age=age,
+    )
+    screening = build_screening_inputs(
+        province=province,
+        province_name=province_name,
+        session_state=session_state,
+        wizard_totals=wizard_totals,
+        raw_inputs=raw_inputs,
+    )
+    eligibility_decision = build_eligibility_decision(
+        tax_year=tax_year,
+        province=province,
+        age=float(age or 0.0),
+        raw_inputs=raw_inputs,
+        result=result,
+    )
+    progress = build_section_progress(
+        session_state=session_state,
+        wizard_totals=wizard_totals,
+        raw_inputs=raw_inputs,
+        result=result,
+        eligibility_decision=eligibility_decision,
+    )
+    guidance_items = build_eligibility_guidance(screening, eligibility_decision, progress)
+    completion_flags = build_completion_flags(
+        screening=screening,
+        progress=progress,
+        wizard_totals=wizard_totals,
+        raw_inputs=raw_inputs,
+        result=result,
+        readiness_df=readiness_df,
+        eligibility_decision=eligibility_decision,
+    )
+    return build_suggestions(
+        screening=screening,
+        guidance_items=guidance_items,
+        progress=progress,
+        completion_flags=completion_flags,
+    )
+
+
+def normalize_ontario_mvp_hidden_state() -> None:
+    hidden_false_keys = [
+        "separated_in_year",
+        "support_payments_to_spouse",
+        "spouse_infirm",
+        "eligible_dependant_infirm",
+        "paid_child_support_for_dependant",
+        "shared_custody_claim_agreement",
+        "another_household_member_claims_dependant",
+        "another_household_member_claims_caregiver",
+        "another_household_member_claims_disability_transfer",
+        "medical_dependant_claim_shared",
+        "spouse_disability_transfer_available",
+        "dependant_disability_transfer_available",
+    ]
+    hidden_zero_keys = [
+        "spouse_disability_transfer_available_amount",
+        "dependant_disability_transfer_available_amount",
+        "provincial_caregiver_claim_amount",
+        "ontario_disability_transfer",
+        "ontario_medical_dependants",
+        "line_21300",
+        "rdsp_repayment",
+        "universal_child_care_benefit",
+        "rdsp_income",
+        "spouse_line_21300",
+        "spouse_rdsp_repayment",
+        "spouse_uccb",
+        "spouse_rdsp_income",
+    ]
+    for key in hidden_false_keys:
+        st.session_state[key] = False
+    for key in hidden_zero_keys:
+        st.session_state[key] = 0.0
+
+
+def persist_mvp_question_state() -> None:
+    q_has_spouse_value = st.session_state.get("q_has_spouse")
+    if q_has_spouse_value in {"Yes", "No"}:
+        st.session_state["mvp_has_spouse_end_of_year"] = q_has_spouse_value == "Yes"
+
+    if "spouse_claim_enabled" in st.session_state:
+        st.session_state["mvp_spouse_claim_enabled"] = bool(st.session_state.get("spouse_claim_enabled", False))
+    if "spouse_net_income" in st.session_state:
+        st.session_state["mvp_spouse_net_income"] = float(st.session_state.get("spouse_net_income", 0.0) or 0.0)
+
+    q_check_cwb_value = st.session_state.get("q_check_cwb")
+    if q_check_cwb_value in {"Yes", "No"}:
+        st.session_state["mvp_check_cwb"] = q_check_cwb_value == "Yes"
+
+    if "cwb_basic_eligible" in st.session_state:
+        st.session_state["mvp_cwb_basic_eligible"] = bool(st.session_state.get("cwb_basic_eligible", False))
+    if "cwb_disability_supplement_eligible" in st.session_state:
+        st.session_state["mvp_cwb_disability_supplement_eligible"] = bool(
+            st.session_state.get("cwb_disability_supplement_eligible", False)
+        )
+    if "spouse_cwb_disability_supplement_eligible" in st.session_state:
+        st.session_state["mvp_spouse_cwb_disability_supplement_eligible"] = bool(
+            st.session_state.get("spouse_cwb_disability_supplement_eligible", False)
+        )
+
+
+def render_pending_step_scroll() -> None:
+    anchor_id = get_state_text("pending_scroll_anchor")
+    if not anchor_id:
+        return
+    components.html(
+        f"""
+        <script>
+        (() => {{
+            const anchorId = "{anchor_id}";
+            const targetHash = "#" + anchorId;
+            const parentWindow = window.parent;
+            const parentDocument = parentWindow.document;
+            const getScrollContainers = () => {{
+                const selectors = [
+                    'section.main',
+                    '[data-testid="stAppViewContainer"]',
+                    '[data-testid="stMain"]',
+                    '.main',
+                    '.stApp',
+                    'body',
+                    'html'
+                ];
+                const containers = [];
+                selectors.forEach((selector) => {{
+                    parentDocument.querySelectorAll(selector).forEach((node) => containers.push(node));
+                }});
+                containers.push(parentDocument.scrollingElement);
+                return [...new Set(containers.filter(Boolean))];
+            }};
+
+            const scrollToAnchor = () => {{
+                const target =
+                    parentDocument.getElementById(anchorId) ||
+                    parentDocument.querySelector(`[id="${{anchorId}}"]`);
+                if (!target) {{
+                    return false;
+                }}
+                parentWindow.history.replaceState(null, "", targetHash);
+                const absoluteTop = target.getBoundingClientRect().top + parentWindow.pageYOffset - 8;
+                target.scrollIntoView({{ behavior: "auto", block: "start", inline: "nearest" }});
+                parentWindow.scrollTo(0, absoluteTop);
+                parentDocument.documentElement.scrollTop = absoluteTop;
+                parentDocument.body.scrollTop = absoluteTop;
+                getScrollContainers().forEach((container) => {{
+                    try {{
+                        container.scrollTop = absoluteTop;
+                    }} catch (error) {{}}
+                }});
+                return true;
+            }};
+
+            let attempts = 0;
+            const maxAttempts = 40;
+            const tick = () => {{
+                attempts += 1;
+                const success = scrollToAnchor();
+                if (!success && attempts < maxAttempts) {{
+                    parentWindow.requestAnimationFrame(tick);
+                    return;
+                }}
+                if (attempts < maxAttempts) {{
+                    parentWindow.setTimeout(() => {{
+                        parentWindow.requestAnimationFrame(tick);
+                    }}, 120);
+                }}
+            }};
+
+            parentWindow.requestAnimationFrame(tick);
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+    st.session_state["pending_scroll_anchor"] = ""
+
+
+def render_mvp_step_shell() -> str:
+    steps = [
+        ("slips", "1. Slips"),
+        ("review_slips", "2. Review"),
+        ("questions", "3. Questions"),
+        ("review_return", "4. Review"),
+        ("results", "5. Results"),
+    ]
+    step_ids = [step_id for step_id, _ in steps]
+    current_step = get_state_text("mvp_step", "slips")
+    if current_step not in step_ids:
+        current_step = "slips"
+        st.session_state["mvp_step"] = current_step
+    if st.session_state.get("mvp_step_selector") != current_step:
+        st.session_state["mvp_step_selector"] = current_step
+
+    with st.container(border=True):
+        st.caption("Ontario MVP flow")
+        selected_step = st.radio(
+            "Progress",
+            step_ids,
+            index=step_ids.index(current_step),
+            key="mvp_step_selector",
+            format_func=lambda step_id: dict(steps)[step_id],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        if selected_step != current_step:
+            st.session_state["mvp_step"] = selected_step
+            queue_step_scroll(selected_step)
+            current_step = selected_step
+        st.caption("Start with slips, answer a few review questions, then calculate an Ontario estimate. Manually review unsupported cases and any values flagged for checking.")
+    return current_step
+
+
+def render_mvp_step_footer(
+    current_step: str,
+    *,
+    next_disabled: bool = False,
+    next_label: str = "Next",
+    show_next: bool = True,
+    show_reset: bool = False,
+    helper_text: str = "Complete the section above, then continue.",
+) -> None:
+    step_ids = ["slips", "review_slips", "questions", "review_return", "results"]
+    current_index = step_ids.index(current_step)
+    nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 4])
+    with nav_col1:
+        if current_index > 0 and st.button("Back", key=f"{current_step}_step_back", use_container_width=True):
+            previous_step = step_ids[current_index - 1]
+            st.session_state["mvp_step"] = previous_step
+            queue_step_scroll(previous_step)
+            st.rerun()
+        if show_reset and st.button("Reset", key=f"{current_step}_step_reset", use_container_width=True):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
+    with nav_col2:
+        if show_next and current_index < len(step_ids) - 1:
+            if st.button(next_label, key=f"{current_step}_step_next", use_container_width=True, disabled=next_disabled):
+                next_step = step_ids[current_index + 1]
+                st.session_state["mvp_step"] = next_step
+                queue_step_scroll(next_step)
+                st.rerun()
+    with nav_col3:
+        st.caption(helper_text)
+
+
+def render_slip_review_cards(configs: list[dict[str, object]]) -> dict[str, list[dict[str, float]]]:
     records_by_key: dict[str, list[dict[str, float]]] = {}
-    tabs = st.tabs([str(config["tab"]) for config in configs])
-    for tab, config in zip(tabs, configs):
-        with tab:
-            records_by_key[str(config["key"])] = render_t_slip_wizard_card(
-                str(config["title"]),
-                str(config["key"]),
-                list(config["fields"]),
+    for config in configs:
+        card_key = str(config["key"])
+        count_key = f"{card_key}_count"
+        current_count = int(st.session_state.get(count_key, 0) or 0)
+        if current_count <= 0:
+            records_by_key[card_key] = []
+            continue
+
+        deduped_records: list[dict[str, float]] = []
+        deduped_reviews: list[dict] = []
+        seen_signatures: set[tuple[tuple[str, float], ...]] = set()
+        for index in range(current_count):
+            record = {
+                str(field["id"]): float(st.session_state.get(f"{card_key}_{index}_{field['id']}", 0.0) or 0.0)
+                for field in config["fields"]
+            }
+            parser_review = st.session_state.get(f"{card_key}_{index}__parser_review")
+            signature = tuple(sorted(record.items()))
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            deduped_records.append(record)
+            deduped_reviews.append(parser_review)
+
+        if len(deduped_records) != current_count:
+            st.session_state[count_key] = len(deduped_records)
+            for index, record in enumerate(deduped_records):
+                for field_id, value in record.items():
+                    st.session_state[f"{card_key}_{index}_{field_id}"] = value
+                if index < len(deduped_reviews):
+                    st.session_state[f"{card_key}_{index}__parser_review"] = deduped_reviews[index]
+
+        records = render_t_slip_wizard_card(
+            str(config["title"]),
+            card_key,
+            list(config["fields"]),
+            count_default=max(1, len(deduped_records)),
+        )
+        records_by_key[card_key] = records
+        if records:
+            for index in range(len(records)):
+                parser_review = st.session_state.get(f"{card_key}_{index}__parser_review")
+                flagged_fields, note = parser_review_summary(parser_review, list(config["fields"]))
+                if flagged_fields:
+                    st.warning(
+                        f"{config['title']} #{index + 1}: Please double-check these extracted fields: {', '.join(flagged_fields)}."
+                    )
+                elif note:
+                    st.info(f"{config['title']} #{index + 1}: {note}")
+            confirmation_key = f"{card_key}_reviewed"
+            st.checkbox(
+                f"I reviewed the {config['title']} entries above",
+                value=bool(st.session_state.get(confirmation_key, False)),
+                key=confirmation_key,
             )
     return records_by_key
 
@@ -1655,6 +1931,7 @@ def coerce_editor_df(editor_df: pd.DataFrame, columns: list[str]) -> pd.DataFram
 
 st.set_page_config(page_title=META_TITLE, page_icon="📱", layout="wide")
 inject_meta_tags()
+debug_mode = bool(st.session_state.get("debug_mode", False))
 
 st.markdown(
     """
@@ -1678,138 +1955,185 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.markdown(
-    """
-    <h1 title="Built for broader personal-return scenarios. It now supports employment, investment, rental income, common deductions, credits, and refund or balance owing estimates." style="margin:0;">
-        Advanced Canadian Personal Tax Estimator
-    </h1>
-    """,
-    unsafe_allow_html=True,
-)
-st.info(
-    "Current scope: broad federal coverage across Canada, with deeper provincial handling for Ontario and British Columbia. "
-    "Other provinces use core bracket and personal-credit rules plus any extra provincial amounts you enter."
+st.subheader(
+    "Ontario T1 Semi-Auto Tax Review & Optimization",
+    help="This is an Ontario-first tax estimate and review tool. It helps you extract slip data, review key amounts, and estimate a personal T1 result, but it is not CRA-certified filing software.",
 )
 
 with st.expander("Scope and assumptions", expanded=False):
     st.markdown(
         """
-        - This estimator follows a T1-style flow: total income, deductions, taxable income, federal tax, provincial tax, and refund or balance owing.
-        - Rental income can now be entered through T776-style property cards, with a manual additional net-rental fallback if needed.
-        - Sole proprietorship and T2125 detail are intentionally excluded for now so we can focus on a stronger personal tax return experience.
-        - Advanced credit automation in this round is strongest for 2025. If you are estimating 2026 and know a specific claim amount that differs, use the manual claim inputs to supplement the result.
-        - For non-Ontario provinces, enter any extra provincial credits as dollar values in the provincial adjustments section.
+        - This MVP is designed as an `estimate and review tool`, not a CRA-certified filing or transmission product.
+        - It currently focuses on Ontario personal T1 returns built mainly from common slips and common follow-up items.
+        - Some benefits are shown as separate recommendations only and are `not automatically included` in the estimate.
+        - Self-employment / T2125, filing transmission, and unsupported complex cases still need manual handling or separate software.
+        - You should manually review unsupported slips, low-confidence extracted values, carryforwards, and unusual household or benefit situations before filing.
         """
     )
-
-st.subheader("1) Return Setup")
-setup_col1, setup_col2, setup_col3 = st.columns(3)
-tax_year = setup_col1.selectbox("Tax Year", AVAILABLE_TAX_YEARS, key="tax_year")
-province = setup_col2.selectbox(
-    "Province",
-    AVAILABLE_PROVINCES,
-    index=AVAILABLE_PROVINCES.index("ON"),
-    key="province",
-    format_func=lambda code: PROVINCES[code],
-)
-age = int(
-    setup_col3.number_input(
-        "Age at Year End",
-        min_value=0,
-        max_value=120,
-        value=int(st.session_state.get("age", 35)),
-        key="age",
-    )
-)
-province_name = PROVINCES[province]
 
 with st.container(border=True):
-    st.markdown("#### Quick Start")
-    st.markdown(
-        """
-        - `Only have T-slips?` Start with `1A) Slips and Source Records`. For many users, that may be enough.
-        - `Have income not already shown on slips?` Review `2) Income and Investment`.
-        - `Have RRSP, FHSA, moving expenses, or other deductions?` Review `3) Deductions`.
-        - `Have donations, medical expenses, spouse or dependant credits, tuition carryforwards, or foreign tax situations?` Review `4) Credits, Carryforwards, and Special Cases`.
-        - `Made instalments or other tax payments outside your slips?` Review `5) Payments and Withholdings`.
-        """
+    st.caption("Return setup")
+    setup_col1, setup_col2, setup_col3 = st.columns(3)
+    tax_year = setup_col1.selectbox("Tax Year", AVAILABLE_TAX_YEARS, key="tax_year")
+    province = setup_col2.selectbox(
+        "Province",
+        ["ON"],
+        index=0,
+        key="province",
+        format_func=lambda code: PROVINCES[code],
+        disabled=True,
+        help="Ontario is the only province available in the current MVP flow.",
     )
-render_tax_newbie_benefits_screener(province, province_name)
+    age = int(
+        setup_col3.number_input(
+            "Age at Year End",
+            min_value=0,
+            max_value=120,
+            value=int(st.session_state.get("age", 35)),
+            key="age",
+        )
+    )
+    with st.expander("Quick Start", expanded=False):
+        st.markdown(
+            """
+            - `Most Ontario users:` upload slips, confirm the values, answer a few quick questions, then calculate.
+            - `Only have slips?` You can often finish with very little manual input.
+            - `Have rental, capital gains, RRSP/FHSA, spouse, or medical/donation items?` The Questions step will ask just enough to cover them.
+            """
+        )
+province_name = PROVINCES[province]
 
-with st.expander("1A) Slips and Source Records", expanded=True):
-    st.info(
-        "For most T-slip-only users, filling 1A may be enough. If you only have slips like T4, T3, T4PS, or T2202, start here first and only complete later sections if you also have deductions, credits, carryforwards, or extra payments to add."
-    )
-    st.caption(
-        "Open the matching slip tab, copy the box amounts exactly as shown, and leave anything missing at 0. Example: T4 Box 14 and Box 22, or the taxable dividend amount shown on a T5."
-    )
-    wizard_records = render_slip_wizard_tabs(SLIP_WIZARD_CONFIGS)
-    st.caption("T4 Box 20 reduces current-year taxable income. T4 Box 52 and T4PS Box 41 are reference-only for this estimate.")
-    t4_wizard_records = wizard_records["t4_wizard"]
-    t4a_wizard_records = wizard_records["t4a_wizard"]
-    t5_wizard_records = wizard_records["t5_wizard"]
-    t3_wizard_records = wizard_records["t3_wizard"]
-    t4ps_wizard_records = wizard_records["t4ps_wizard"]
-    t2202_wizard_records = wizard_records["t2202_wizard"]
+mvp_step = render_mvp_step_shell()
 
-    st.markdown("#### Property and Capital Schedules")
-    property_tabs = st.tabs(["Rental Properties", "Capital Gains Schedule"])
-    with property_tabs[0]:
-        rental_schedule_df = render_record_card_editor(
-        "Rental Properties",
-        "rental_schedules",
-        [
-            {
-                "id": "property_label",
-                "label": "Property Label",
-                "type": "text",
-                "placeholder": "e.g. Toronto condo or Ottawa duplex",
-            },
-            {"id": "gross_rent", "label": "Gross Rents", "step": 100.0},
-            {"id": "advertising", "label": "Advertising", "step": 100.0},
-            {"id": "insurance", "label": "Insurance", "step": 100.0},
-            {"id": "interest_bank_charges", "label": "Interest and Bank Charges", "step": 100.0},
-            {"id": "property_taxes", "label": "Property Taxes", "step": 100.0},
-            {"id": "utilities", "label": "Utilities", "step": 100.0},
-            {"id": "repairs_maintenance", "label": "Repairs and Maintenance", "step": 100.0},
-            {"id": "management_admin", "label": "Management and Administration", "step": 100.0},
-            {"id": "travel", "label": "Travel", "step": 100.0},
-            {"id": "office_expenses", "label": "Office Expenses", "step": 100.0},
-            {"id": "other_expenses", "label": "Other Expenses", "step": 100.0},
-            {"id": "cca", "label": "CCA", "step": 100.0},
-        ],
-        "Enter one card per property. The app totals the main T776 expense categories and then subtracts CCA.",
+uploaded_slip_count = sum(
+    int(st.session_state.get(f"{config['key']}_count", 0) or 0)
+    for config in SLIP_WIZARD_CONFIGS
+)
+
+uploaded_files = []
+if mvp_step == "slips":
+    render_step_heading("1. Upload Slips", "1-upload-slips")
+    st.caption("Best fit for T4, T4A, T5, T3, T4PS, and T2202. Start here even if you may have a few extra deductions later.")
+    uploaded_files = st.file_uploader(
+        "Upload T-Slips (PDF/Scanned Images)",
+        accept_multiple_files=True,
     )
-    with property_tabs[1]:
-        capital_schedule_df = render_record_card_editor(
-        "Capital Gains Schedule",
-        "capital_gain_schedules",
-        [
-            {
-                "id": "description",
-                "label": "Description",
-                "type": "text",
-                "placeholder": "e.g. ABC shares or rental property sale",
-            },
-            {
-                "id": "property_type",
-                "label": "Property Type",
-                "type": "select",
-                "options": [
-                    "Publicly traded shares",
-                    "Mutual funds / ETF",
-                    "Real estate",
-                    "Crypto asset",
-                    "Other capital property",
-                ],
-                "value": "Publicly traded shares",
-            },
-            {"id": "proceeds", "label": "Proceeds of Disposition", "step": 100.0},
-            {"id": "acb", "label": "Adjusted Cost Base", "step": 100.0},
-            {"id": "outlays", "label": "Outlays and Expenses", "step": 100.0},
-        ],
-        "Enter one row per disposition. Current-year gains and losses are netted before the 50% inclusion rate is applied.",
+    if uploaded_files and st.button("Extract Data", type="primary"):
+        processed_count = 0
+        recognized_keys: list[str] = []
+        unrecognized_files: list[str] = []
+        low_confidence_files: list[str] = []
+        with st.spinner("Reading your slips..."):
+            for f in uploaded_files:
+                processed_count += 1
+                temp_path = f"tmp_{f.name}"
+                with open(temp_path, "wb") as w:
+                    w.write(f.getbuffer())
+
+                result = parse_pdf_slip(temp_path, f.name)
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+                if result["type"] != "UNKNOWN":
+                    wizard_key = result["type"].lower() + "_wizard"
+                    if wizard_key not in recognized_keys:
+                        recognized_keys.append(wizard_key)
+                    current_count = int(st.session_state.get(f"{wizard_key}_count", 0))
+                    for key, val in result["data"].items():
+                        st.session_state[f"{wizard_key}_{current_count}_{key}"] = val
+                    st.session_state[f"{wizard_key}_{current_count}__parser_review"] = {
+                        "confidence": dict(result.get("confidence", {})),
+                        "evidence": dict(result.get("evidence", {})),
+                        "meta": dict(result.get("meta", {})),
+                        "filename": f.name,
+                    }
+                    avg_confidence = float((result.get("meta", {}) or {}).get("avg_confidence", 0.0) or 0.0)
+                    fallback_used = bool((result.get("meta", {}) or {}).get("text_fallback_triggered", False))
+                    low_confidence_field_count = sum(
+                        1 for value in dict(result.get("confidence", {})).values()
+                        if float(value or 0.0) < LOW_CONFIDENCE_FIELD_THRESHOLD
+                    )
+                    if avg_confidence < LOW_CONFIDENCE_THRESHOLD or fallback_used or low_confidence_field_count > 0:
+                        low_confidence_files.append(f.name)
+                    st.session_state[f"{wizard_key}_count"] = current_count + 1
+                    st.success(f"Processed {f.name} as {result['type']}.")
+                else:
+                    unrecognized_files.append(f.name)
+                    st.warning(f"{f.name} could not be matched to a supported slip type.")
+        st.session_state["upload_extraction_summary"] = {
+            "processed_count": processed_count,
+            "recognized_labels": [SLIP_TYPE_LABELS.get(key, key) for key in recognized_keys],
+            "unrecognized_files": unrecognized_files,
+            "low_confidence_files": low_confidence_files,
+        }
+        st.session_state["upload_extracted_notice"] = True
+        st.rerun()
+    if get_state_bool("upload_extracted_notice") and st.session_state.get("upload_extraction_summary", {}).get("processed_count", 0):
+        render_upload_extraction_feedback()
+    render_mvp_step_footer(
+        "slips",
+        next_disabled=uploaded_slip_count == 0,
+        helper_text="Upload and extract at least one supported slip before continuing.",
     )
+
+if mvp_step == "review_slips":
+    render_step_heading("2. Review Slip Values", "2-review-slip-values")
+    st.caption("Check the key boxes below. Most people only need to confirm these values before moving on.")
+    wizard_records = render_slip_review_cards(SLIP_WIZARD_CONFIGS)
+else:
+    wizard_records = {
+        "t4_wizard": st.session_state.get("t4_wizard", []),
+        "t4a_wizard": st.session_state.get("t4a_wizard", []),
+        "t5_wizard": st.session_state.get("t5_wizard", []),
+        "t3_wizard": st.session_state.get("t3_wizard", []),
+        "t4ps_wizard": st.session_state.get("t4ps_wizard", []),
+        "t2202_wizard": st.session_state.get("t2202_wizard", []),
+    }
+
+t4_wizard_records = wizard_records["t4_wizard"]
+t4a_wizard_records = wizard_records["t4a_wizard"]
+t5_wizard_records = wizard_records["t5_wizard"]
+t3_wizard_records = wizard_records["t3_wizard"]
+t4ps_wizard_records = wizard_records["t4ps_wizard"]
+t2202_wizard_records = wizard_records["t2202_wizard"]
+
+review_required_keys = [
+    str(config["key"])
+    for config in SLIP_WIZARD_CONFIGS
+    if int(st.session_state.get(f"{config['key']}_count", 0) or 0) > 0
+]
+review_complete = all(get_state_bool(f"{key}_reviewed") for key in review_required_keys) if review_required_keys else False
+if mvp_step == "review_slips":
+    render_mvp_step_footer(
+        "review_slips",
+        next_disabled=not review_complete,
+        helper_text="Review each uploaded slip and tick the confirmation box before continuing.",
+    )
+
+if mvp_step == "questions":
+    render_step_heading("3. Quick Questions", "3-quick-questions")
+    st.caption("Only answer the items that apply to you. Most fields stay hidden unless you answer Yes.")
+
+rental_schedule_df = pd.DataFrame(
+    columns=[
+        "property_label",
+        "gross_rent",
+        "advertising",
+        "insurance",
+        "interest_bank_charges",
+        "property_taxes",
+        "utilities",
+        "repairs_maintenance",
+        "management_admin",
+        "travel",
+        "office_expenses",
+        "other_expenses",
+        "cca",
+    ]
+)
+capital_schedule_df = pd.DataFrame(columns=["description", "property_type", "proceeds", "acb", "outlays"])
 
 t4_wizard_df = build_wizard_df(t4_wizard_records, SLIP_WIZARD_CONFIGS[0]["columns"])
 t4a_wizard_df = build_wizard_df(t4a_wizard_records, SLIP_WIZARD_CONFIGS[1]["columns"])
@@ -1907,1052 +2231,312 @@ schedule3_net_capital_gain_or_loss = schedule3_gross_capital_gains - schedule3_g
 schedule3_taxable_capital_gains = max(0.0, schedule3_net_capital_gain_or_loss * 0.5)
 schedule3_allowable_capital_loss = max(0.0, -schedule3_net_capital_gain_or_loss * 0.5)
 
-with st.expander("2) Income and Investment (Optional if not already covered by slips)", expanded=False):
-    st.caption("Most users can skip this section if all of their income is already covered by slips in 1A. Use it only for extra income, manual additions, or when you want a clearer worksheet trail.")
-    st.markdown("#### Income")
-    income_col1, income_col2, income_col3 = st.columns(3)
-    employment_income_manual = number_input("Manual Employment Income", "employment_income", 1000.0)
-    pension_income_manual = number_input("Manual Pension / Annuity Income", "pension_income", 500.0)
-    rrsp_rrif_income_manual = number_input(
-        "Manual RRSP / RRIF Income",
-        "rrsp_rrif_income",
-        500.0,
-        "Use this for taxable RRSP/RRIF withdrawals or similar line 12800-style income not already captured elsewhere.",
-    )
-    other_income_manual = number_input("Manual Other Taxable Income", "other_income", 500.0)
-    manual_net_rental_income = number_input(
-        "Manual Additional Net Rental Income",
-        "net_rental_income",
-        500.0,
-        "Use this only for net rental income not already entered through the T776 property cards above.",
-    )
-    manual_taxable_capital_gains = number_input(
-        "Manual Additional Taxable Capital Gains",
-        "taxable_capital_gains",
-        500.0,
-        "Use this only for taxable capital gains not already captured in Schedule 3 cards or T4PS box 34.",
-    )
-    interest_income_manual = number_input(
-        "Manual Interest / Investment Income",
-        "interest_income",
-        100.0,
-        "Line 12100-style interest or other investment income not already captured by T5/T3 slips.",
-    )
-    eligible_dividends = number_input(
-        "Eligible Dividends (cash received, before gross-up)",
-        "eligible_dividends",
-        100.0,
-        "Enter the actual cash dividend received. Do not gross this up yourself. Example: if you received $100 cash, enter $100, not $138.",
-    )
-    non_eligible_dividends = number_input(
-        "Non-Eligible Dividends (cash received, before gross-up)",
-        "non_eligible_dividends",
-        100.0,
-        "Enter the actual cash dividend received. Do not gross this up yourself.",
-    )
+if mvp_step == "questions":
+    st.markdown("#### Most Common Questions")
+    st.caption("Start with the 7 most common Ontario follow-up items. Open the less common section only if needed.")
+    with st.container(border=True):
+        st.markdown("#### Core Deductions")
+        if st.radio("Did you contribute to RRSP?", ["No", "Yes"], horizontal=True, key="q_has_rrsp") == "Yes":
+            number_input("RRSP Deduction Claimed", "rrsp_deduction", 500.0)
+        if st.radio("Did you have deductible work expenses?", ["No", "Yes"], horizontal=True, key="q_has_work_expenses") == "Yes":
+            number_input("Other Employment Expenses", "other_employment_expenses", 100.0)
 
-    st.markdown("#### Dividend Slips")
-    div_col1, div_col2, div_col3 = st.columns(3)
-    t5_eligible_dividends_taxable = number_input(
-        "T5 Eligible Dividends Taxable Amount (grossed-up slip amount)",
-        "t5_eligible_dividends_taxable",
-        100.0,
-        "Use the taxable amount shown on the slip, not the cash amount. If you already entered a manual cash dividend above for the same amount, do not enter it again here.",
-    )
-    t5_non_eligible_dividends_taxable = number_input(
-        "T5 Other Than Eligible Dividends Taxable Amount (grossed-up slip amount)",
-        "t5_non_eligible_dividends_taxable",
-        100.0,
-        "Use the taxable amount shown on the slip. Do not add the same dividend again as a manual cash amount above.",
-    )
-    t5_federal_dividend_credit = number_input(
-        "T5 Federal Dividend Tax Credit",
-        "t5_federal_dividend_credit",
-        10.0,
-        "If your T5/T3 slips already show the federal dividend tax credit, enter it here to override auto-estimation for those slips.",
-    )
-    t3_eligible_dividends_taxable = number_input(
-        "T3 Eligible Dividends Taxable Amount (grossed-up slip amount)",
-        "t3_eligible_dividends_taxable",
-        100.0,
-        "Use the taxable amount from the T3 slip. Skip this if the amount is already captured through the slip wizard.",
-    )
-    t3_non_eligible_dividends_taxable = number_input(
-        "T3 Other Than Eligible Dividends Taxable Amount (grossed-up slip amount)",
-        "t3_non_eligible_dividends_taxable",
-        100.0,
-        "Use the taxable amount from the T3 slip. Skip this if the amount is already captured through the slip wizard.",
-    )
-    t3_federal_dividend_credit = number_input(
-        "T3 Federal Dividend Tax Credit",
-        "t3_federal_dividend_credit",
-        10.0,
-    )
+    with st.container(border=True):
+        st.markdown("#### Core Credits")
+        if st.radio("Did you have medical expenses?", ["No", "Yes"], horizontal=True, key="q_has_medical") == "Yes":
+            number_input("Medical Expenses Paid", "medical_expenses_paid", 100.0)
+        if st.radio("Did you make charitable donations?", ["No", "Yes"], horizontal=True, key="q_has_donations") == "Yes":
+            number_input("Charitable Donations", "charitable_donations", 100.0)
 
-    employment_income = (
-        employment_income_manual
-        + float(t4_wizard_totals.get("box14_employment_income", 0.0))
-    )
-    pension_income = (
-        pension_income_manual
-        + float(t4a_wizard_totals.get("box16_pension", 0.0))
-        + float(t3_wizard_totals.get("box31_pension_income", 0.0))
-    )
-    other_income = (
-        other_income_manual
-        + rrsp_rrif_income_manual
-        + float(t4a_wizard_totals.get("box18_lump_sum", 0.0))
-        + float(t4a_wizard_totals.get("box28_other_income", 0.0))
-        + float(t3_wizard_totals.get("box26_other_income", 0.0))
-        + float(t4ps_wizard_totals.get("box35_other_employment_income", 0.0))
-    )
-    net_rental_income = manual_net_rental_income + t776_net_rental_income
-    taxable_capital_gains = manual_taxable_capital_gains + schedule3_taxable_capital_gains
-    interest_income = (
-        interest_income_manual
-        + float(t5_wizard_totals.get("box13_interest", 0.0))
-    )
-    t5_eligible_dividends_taxable += float(t5_wizard_totals.get("box25_eligible_dividends_taxable", 0.0))
-    t5_eligible_dividends_taxable += float(t4ps_wizard_totals.get("box31_eligible_dividends_taxable", 0.0))
-    t5_non_eligible_dividends_taxable += float(t5_wizard_totals.get("box11_non_eligible_dividends_taxable", 0.0))
-    t5_non_eligible_dividends_taxable += float(t4ps_wizard_totals.get("box25_non_eligible_dividends_taxable", 0.0))
-    federal_dividend_credit_slip_total = (
-        float(t5_wizard_totals.get("box26_eligible_dividend_credit", 0.0))
-        + float(t5_wizard_totals.get("box12_non_eligible_dividend_credit", 0.0))
-        + float(t3_wizard_totals.get("box51_eligible_dividend_credit", 0.0))
-        + float(t3_wizard_totals.get("box39_non_eligible_dividend_credit", 0.0))
-        + float(t4ps_wizard_totals.get("box32_eligible_dividend_credit", 0.0))
-        + float(t4ps_wizard_totals.get("box26_non_eligible_dividend_credit", 0.0))
-    )
-    t5_federal_dividend_credit += float(t5_wizard_totals.get("box26_eligible_dividend_credit", 0.0)) + float(t5_wizard_totals.get("box12_non_eligible_dividend_credit", 0.0))
-    t5_federal_dividend_credit += float(t4ps_wizard_totals.get("box26_non_eligible_dividend_credit", 0.0)) + float(t4ps_wizard_totals.get("box32_eligible_dividend_credit", 0.0))
-    t3_eligible_dividends_taxable += float(t3_wizard_totals.get("box50_eligible_dividends_taxable", 0.0))
-    t3_non_eligible_dividends_taxable += float(t3_wizard_totals.get("box32_non_eligible_dividends_taxable", 0.0))
-    t3_federal_dividend_credit += float(t3_wizard_totals.get("box51_eligible_dividend_credit", 0.0)) + float(t3_wizard_totals.get("box39_non_eligible_dividend_credit", 0.0))
+    with st.container(border=True):
+        st.markdown("#### Benefits")
+        if st.radio("Do you want us to check Canada Workers Benefit (CWB)?", ["No", "Yes"], horizontal=True, key="q_check_cwb") == "Yes":
+            st.session_state["cwb_basic_eligible"] = True
+            st.caption("CWB basic eligibility check is now on for this return.")
+            st.checkbox(
+                "Check CWB disability supplement eligibility",
+                value=bool(st.session_state.get("cwb_disability_supplement_eligible", False)),
+                key="cwb_disability_supplement_eligible",
+            )
+            if get_state_bool("has_spouse_end_of_year"):
+                st.checkbox(
+                    "Check spouse CWB disability supplement eligibility",
+                    value=bool(st.session_state.get("spouse_cwb_disability_supplement_eligible", False)),
+                    key="spouse_cwb_disability_supplement_eligible",
+                )
+        else:
+            st.session_state["cwb_basic_eligible"] = False
+            st.session_state["cwb_disability_supplement_eligible"] = False
+            st.session_state["spouse_cwb_disability_supplement_eligible"] = False
 
-    t4_reference_box24_total = (
-        float(t4_wizard_totals.get("box24_ei_insurable_earnings", 0.0))
-    )
-    t4_reference_box26_total = (
-        float(t4_wizard_totals.get("box26_cpp_pensionable_earnings", 0.0))
-    )
-    t4_reference_box52_total = (
-        float(t4_wizard_totals.get("box52_pension_adjustment", 0.0))
-    )
-    with st.expander("Input Totals and T4 Reference", expanded=False):
-        st.dataframe(
-            build_currency_df(
-                [
-                    {"Group": "Income Totals", "Item": "Employment incl. T4", "Amount": employment_income},
-                    {"Group": "Income Totals", "Item": "Pension incl. T4A", "Amount": pension_income},
-                    {"Group": "Income Totals", "Item": "RRSP / RRIF Income", "Amount": rrsp_rrif_income_manual},
-                    {"Group": "Income Totals", "Item": "Other incl. T4A", "Amount": other_income},
-                    {"Group": "Income Totals", "Item": "Interest incl. T5/T3", "Amount": interest_income},
-                    {"Group": "Income Totals", "Item": "Net Rental incl. T776", "Amount": net_rental_income},
-                    {
-                        "Group": "Income Totals",
-                        "Item": "Taxable Capital Gains incl. Schedule 3",
-                        "Amount": taxable_capital_gains,
-                    },
-                    {
-                        "Group": "Income Totals",
-                        "Item": "Current-Year Allowable Capital Loss",
-                        "Amount": schedule3_allowable_capital_loss,
-                    },
-                    {
-                        "Group": "Slip Totals",
-                        "Item": "Wizard T4 Income",
-                        "Amount": float(t4_wizard_totals.get("box14_employment_income", 0.0)),
-                    },
-                    {
-                        "Group": "Slip Totals",
-                        "Item": "Wizard T4 Tax Withheld",
-                        "Amount": float(t4_wizard_totals.get("box22_tax_withheld", 0.0)),
-                    },
-                    {
-                        "Group": "Slip Totals",
-                        "Item": "Wizard T4 RPP",
-                        "Amount": float(t4_wizard_totals.get("box20_rpp", 0.0)),
-                    },
-                    {
-                        "Group": "Slip Totals",
-                        "Item": "Wizard Union Dues",
-                        "Amount": float(t4_wizard_totals.get("box44_union_dues", 0.0)),
-                    },
-                    {
-                        "Group": "Slip Totals",
-                        "Item": "Wizard T4A Pension",
-                        "Amount": float(t4a_wizard_totals.get("box16_pension", 0.0)),
-                    },
-                    {
-                        "Group": "Slip Totals",
-                        "Item": "Wizard T5 Interest",
-                        "Amount": float(t5_wizard_totals.get("box13_interest", 0.0)),
-                    },
-                    {
-                        "Group": "Slip Totals",
-                        "Item": "Federal Dividend Credit From Slip Boxes",
-                        "Amount": federal_dividend_credit_slip_total,
-                    },
-                    {
-                        "Group": "Slip Totals",
-                        "Item": "Wizard T3 Other Income",
-                        "Amount": float(t3_wizard_totals.get("box26_other_income", 0.0)),
-                    },
-                    {
-                        "Group": "Slip Totals",
-                        "Item": "Wizard T3 Box 21 Capital Gains",
-                        "Amount": t3_box21_capital_amount,
-                    },
-                    {
-                        "Group": "Slip Totals",
-                        "Item": "Wizard T2202 Tuition",
-                        "Amount": max(
-                            float(t2202_wizard_totals.get("box26_total_eligible_tuition", 0.0)),
-                            float(t2202_wizard_totals.get("box23_session_tuition", 0.0)),
-                        ),
-                    },
-                    {
-                        "Group": "Slip Totals",
-                        "Item": "T4PS Box 34 Capital Gain/Loss",
-                        "Amount": t4ps_box34_capital_amount,
-                    },
-                    {
-                        "Group": "Slip Totals",
-                        "Item": "T4PS Box 41 EPSP Contributions (Reference)",
-                        "Amount": t4ps_box41_epsp_contributions,
-                    },
-                ],
-                ["Amount"],
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-        st.dataframe(
-            build_currency_df(
-                [
-                    {
-                        "Item": "T4 Box 24 EI Insurable Earnings",
-                        "Amount": t4_reference_box24_total,
-                    },
-                    {
-                        "Item": "T4 Box 26 CPP Pensionable Earnings",
-                        "Amount": t4_reference_box26_total,
-                    },
-                    {
-                        "Item": "T4 Box 52 Pension Adjustment",
-                        "Amount": t4_reference_box52_total,
-                    },
-                ],
-                ["Amount"],
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+    with st.container(border=True):
+        st.markdown("#### Household")
+        if st.radio(
+            "Did you have a spouse or common-law partner at year end?",
+            ["No", "Yes"],
+            horizontal=True,
+            key="q_has_spouse",
+            help="If yes, we can check whether you may qualify for the spouse or common-law partner amount tax credit.",
+        ) == "Yes":
+            st.session_state["has_spouse_end_of_year"] = True
+            st.caption("If you claim the spouse amount and your spouse or common-law partner had low net income, you may qualify for a tax credit.")
+            st.checkbox("Check spouse amount eligibility", value=bool(st.session_state.get("spouse_claim_enabled", True)), key="spouse_claim_enabled")
+            number_input("Spouse Net Income", "spouse_net_income", 100.0)
+        else:
+            st.session_state["has_spouse_end_of_year"] = False
 
-with st.expander("3) Deductions (Optional)", expanded=False):
-    st.caption("Use this section only if you have deductions that reduce income, such as RRSP or FHSA contributions, moving expenses, child care, support payments, or investment carrying charges. If you only have slips and no extra deductions, you can usually skip it.")
-    st.markdown("#### Registered Plans And Payroll Deductions")
-    ded_col1, ded_col2, ded_col3 = st.columns(3)
-    rrsp_deduction = number_input(
-        "RRSP Deduction Claimed This Year (line 20800)",
-        "rrsp_deduction",
-        500.0,
-        "Enter the amount you are claiming as a deduction this year, not just the amount contributed if you plan to carry some of it forward.",
-    )
-    fhsa_deduction = number_input(
-        "FHSA Deduction Claimed This Year (line 20805)",
-        "fhsa_deduction",
-        500.0,
-        "Enter the amount you are claiming this year. If you contributed but are not deducting the full amount now, enter only the part claimed.",
-    )
-    rpp_contribution = number_input("RPP Contribution", "rpp_contribution", 500.0)
-    union_dues = number_input("Union / Professional Dues (line 22200)", "union_dues", 100.0)
-    st.markdown("#### Family, Work, And Moving Costs")
-    ded_col4, ded_col5, ded_col6 = st.columns(3)
-    child_care_expenses = number_input("Child Care Expenses (line 22100)", "child_care_expenses", 100.0)
-    moving_expenses = number_input("Moving Expenses (line 21900)", "moving_expenses", 100.0)
-    support_payments_deduction = number_input("Deductible Support Payments (line 22000)", "support_payments_deduction", 100.0)
-    st.markdown("#### Investment, Employment, And Carryforwards")
-    ded_col7, ded_col8, ded_col9 = st.columns(3)
-    carrying_charges = number_input(
-        "Carrying Charges / Investment Interest",
-        "carrying_charges",
-        100.0,
-        "Use this for deductible investment carrying charges or interest. Do not include personal credit-card or mortgage interest.",
-    )
-    other_employment_expenses = number_input(
-        "Other Employment Expenses (line 22900)",
-        "other_employment_expenses",
-        100.0,
-        "Use this for deductible employment expenses not already included elsewhere.",
-    )
-    other_deductions = number_input(
-        "Other Deductions",
-        "other_deductions",
-        100.0,
-        "Use this only for deductible amounts not already covered above so you do not double count them.",
-    )
-    net_capital_loss_carryforward = number_input(
-        "Net Capital Loss Carryforward",
-        "net_capital_loss_carryforward",
-        100.0,
-        "Line 25300-style deduction against taxable income.",
-    )
-    other_loss_carryforward = number_input(
-        "Other Loss Carryforward",
-        "other_loss_carryforward",
-        100.0,
-    )
-rpp_contribution += float(t4_wizard_totals.get("box20_rpp", 0.0))
-union_dues += float(t4_wizard_totals.get("box44_union_dues", 0.0))
+    with st.container(border=True):
+        st.markdown("#### Payments")
+        if st.radio("Did you make instalments or other tax payments outside your slips?", ["No", "Yes"], horizontal=True, key="q_has_payments") == "Yes":
+            number_input("Tax Instalments Paid", "installments_paid", 100.0)
+            number_input("Other Tax Payments / Credits", "other_payments", 100.0)
 
-with st.expander("4) Credits, Carryforwards, and Special Cases (Optional)", expanded=False):
-    st.caption("Most users only need one or two parts of this section. Open the rest only if they apply to you.")
-    st.markdown("#### Common Credits And Claim Amounts")
-    st.caption("Open this part if you have tuition, medical expenses, donations, student loan interest, or other common claim amounts.")
-    with st.expander("Household And Dependants", expanded=False):
-        st.caption("Open this only if spouse, dependant, caregiver, disability-transfer, or shared-claim rules apply to you.")
-        household_tabs = st.tabs(["Your Household", "Dependant Details", "Claim Conflicts"])
-        with household_tabs[0]:
-            with st.container(border=True):
-                marital_col1, marital_col2 = st.columns(2)
-                spouse_claim_enabled = marital_col1.checkbox(
-                    "Claim spouse / common-law partner amount",
-                    value=bool(st.session_state.get("spouse_claim_enabled", False)),
-                    key="spouse_claim_enabled",
-                )
-                has_spouse_end_of_year = marital_col1.checkbox(
-                    "Had a spouse or common-law partner at year end",
-                    value=bool(st.session_state.get("has_spouse_end_of_year", False)),
-                    key="has_spouse_end_of_year",
-                )
-                separated_in_year = marital_col1.checkbox(
-                    "Separated during the year",
-                    value=bool(st.session_state.get("separated_in_year", False)),
-                    key="separated_in_year",
-                )
-                support_payments_to_spouse = marital_col1.checkbox(
-                    "Paid support to spouse / partner",
-                    value=bool(st.session_state.get("support_payments_to_spouse", False)),
-                    key="support_payments_to_spouse",
-                )
-                spouse_infirm = marital_col2.checkbox(
-                    "Spouse / partner is infirm",
-                    value=bool(st.session_state.get("spouse_infirm", False)),
-                    key="spouse_infirm",
-                )
-                spouse_disability_transfer_available = marital_col2.checkbox(
-                    "Spouse / partner has unused disability transfer",
-                    value=bool(st.session_state.get("spouse_disability_transfer_available", False)),
-                    key="spouse_disability_transfer_available",
-                    help="Check if the spouse/common-law partner has an unused disability amount transfer available to claim.",
-                )
-                spouse_disability_transfer_available_amount = number_input(
-                    "Unused spouse / partner disability transfer amount",
-                    "spouse_disability_transfer_available_amount",
-                    100.0,
-                    "Optional. Enter the unused spouse disability transfer amount available before claiming it.",
-                )
-                spouse_net_income = number_input(
-                    "Spouse / partner net income",
-                    "spouse_net_income",
-                    100.0,
-                    "Used to estimate the spouse amount if you are claiming it.",
-                )
-        with household_tabs[1]:
-            with st.container(border=True):
-                dep_col1, dep_col2 = st.columns(2)
-                eligible_dependant_claim_enabled = dep_col1.checkbox(
-                    "Claim an eligible dependant amount",
-                    value=bool(st.session_state.get("eligible_dependant_claim_enabled", False)),
-                    key="eligible_dependant_claim_enabled",
-                )
-                eligible_dependant_infirm = dep_col1.checkbox(
-                    "Dependant is infirm",
-                    value=bool(st.session_state.get("eligible_dependant_infirm", False)),
-                    key="eligible_dependant_infirm",
-                )
-                dependant_lived_with_you = dep_col1.checkbox(
-                    "Dependant lived with you",
-                    value=bool(st.session_state.get("dependant_lived_with_you", False)),
-                    key="dependant_lived_with_you",
-                )
-                eligible_dependant_net_income = number_input(
-                    "Dependant net income",
-                    "eligible_dependant_net_income",
-                    100.0,
-                    "Used to estimate the eligible dependant amount if you are claiming it.",
-                )
-                dependant_relationship = dep_col2.selectbox(
-                    "Dependant relationship to you",
-                    ["Child", "Parent/Grandparent", "Other relative", "Other"],
-                    index=["Child", "Parent/Grandparent", "Other relative", "Other"].index(str(st.session_state.get("dependant_relationship", "Child")) if str(st.session_state.get("dependant_relationship", "Child")) in ["Child", "Parent/Grandparent", "Other relative", "Other"] else "Child"),
-                    key="dependant_relationship",
-                    help="Used in household-claim restriction checks.",
-                )
-                dependant_category = dep_col2.selectbox(
-                    "Dependant type",
-                    ["Minor child", "Adult child", "Parent/Grandparent", "Other adult relative", "Other"],
-                    index=[
-                        "Minor child",
-                        "Adult child",
-                        "Parent/Grandparent",
-                        "Other adult relative",
-                        "Other",
-                    ].index(
-                        str(st.session_state.get("dependant_category", "Minor child"))
-                        if str(st.session_state.get("dependant_category", "Minor child")) in [
-                            "Minor child",
-                            "Adult child",
-                            "Parent/Grandparent",
-                            "Other adult relative",
-                            "Other",
-                        ]
-                        else "Minor child"
-                    ),
-                    key="dependant_category",
-                    help="Used for finer household and transfer restriction checks.",
-                )
-                dependant_disability_transfer_available = dep_col2.checkbox(
-                    "Dependant has unused disability transfer",
-                    value=bool(st.session_state.get("dependant_disability_transfer_available", False)),
-                    key="dependant_disability_transfer_available",
-                    help="Check if the dependant has an unused disability amount transfer available.",
-                )
-                dependant_disability_transfer_available_amount = number_input(
-                    "Unused dependant disability transfer amount",
-                    "dependant_disability_transfer_available_amount",
-                    100.0,
-                    "Optional. Enter the unused dependant disability transfer amount available before claiming it.",
-                )
-        with household_tabs[2]:
-            with st.container(border=True):
-                restrict_col1, restrict_col2 = st.columns(2)
-                paid_child_support_for_dependant = restrict_col1.checkbox(
-                    "You paid child support for this dependant",
-                    value=bool(st.session_state.get("paid_child_support_for_dependant", False)),
-                    key="paid_child_support_for_dependant",
-                )
-                shared_custody_claim_agreement = restrict_col1.checkbox(
-                    "There is a shared-custody claim agreement",
-                    value=bool(st.session_state.get("shared_custody_claim_agreement", False)),
-                    key="shared_custody_claim_agreement",
-                )
-                another_household_member_claims_dependant = restrict_col1.checkbox(
-                    "Someone else in the household is claiming this dependant",
-                    value=bool(st.session_state.get("another_household_member_claims_dependant", False)),
-                    key="another_household_member_claims_dependant",
-                )
-                another_household_member_claims_caregiver = restrict_col2.checkbox(
-                    "Someone else is claiming the caregiver amount",
-                    value=bool(st.session_state.get("another_household_member_claims_caregiver", False)),
-                    key="another_household_member_claims_caregiver",
-                )
-                another_household_member_claims_disability_transfer = restrict_col2.checkbox(
-                    "Someone else is claiming the disability transfer",
-                    value=bool(st.session_state.get("another_household_member_claims_disability_transfer", False)),
-                    key="another_household_member_claims_disability_transfer",
-                )
-                medical_dependant_claim_shared = restrict_col2.checkbox(
-                    "Someone else is sharing or claiming this dependant's medical expenses",
-                    value=bool(st.session_state.get("medical_dependant_claim_shared", False)),
-                    key="medical_dependant_claim_shared",
-                )
-                caregiver_claim_target = restrict_col2.selectbox(
-                    "Caregiver claim should apply to",
-                    ["Auto", "Spouse", "Dependant"],
-                    index=["Auto", "Spouse", "Dependant"].index(
-                        str(st.session_state.get("caregiver_claim_target", "Auto"))
-                        if str(st.session_state.get("caregiver_claim_target", "Auto")) in ["Auto", "Spouse", "Dependant"]
-                        else "Auto"
-                    ),
-                    key="caregiver_claim_target",
-                    help="Use this when both spouse and dependant could qualify and you want to control which household member the caregiver claim is tied to.",
-                )
-                disability_transfer_source = restrict_col2.selectbox(
-                    "Disability transfer should come from",
-                    ["Auto", "Spouse", "Dependant"],
-                    index=["Auto", "Spouse", "Dependant"].index(
-                        str(st.session_state.get("disability_transfer_source", "Auto"))
-                        if str(st.session_state.get("disability_transfer_source", "Auto")) in ["Auto", "Spouse", "Dependant"]
-                        else "Auto"
-                    ),
-                    key="disability_transfer_source",
-                    help="Choose the source of the disability transfer when both spouse and dependant could qualify.",
-                )
-        with st.expander("Additional Dependants (Only If You Have More Than One)", expanded=False):
-            st.caption("Use this only if you have more than one dependant to review.")
-            additional_dependants_df = render_record_card_editor(
-                "Additional Dependants",
-                "additional_dependants",
-                [
-                    {"id": "dependant_label", "label": "Dependant name or label", "type": "text", "placeholder": "Dependant 2"},
-                    {"id": "category", "label": "Dependant type", "type": "select", "options": ["Minor child", "Adult child", "Parent/Grandparent", "Other adult relative", "Other"]},
-                    {"id": "infirm", "label": "Infirm", "type": "select", "options": ["No", "Yes"]},
-                    {"id": "lived_with_you", "label": "Lived with you", "type": "select", "options": ["No", "Yes"]},
-                    {"id": "caregiver_claim_amount", "label": "Caregiver claim amount", "step": 100.0},
-                    {"id": "disability_transfer_available_amount", "label": "Unused disability transfer amount", "step": 100.0},
-                    {"id": "medical_expenses_amount", "label": "Medical expenses for this dependant", "step": 100.0},
-                    {"id": "medical_claim_shared", "label": "Medical already shared or claimed by someone else", "type": "select", "options": ["No", "Yes"]},
-                ],
-                "Use this only if you have more than one dependant to review. These rows feed the caregiver, disability transfer, and dependant-medical pools.",
-                count_default=0,
+    with st.expander("Less Common Questions", expanded=False):
+        st.caption("Open this only if any of these extra items apply to you.")
+        with st.container(border=True):
+            st.markdown("#### Extra Income")
+            rental_toggle = st.radio(
+                "Do you have rental income not already shown on slips?",
+                ["No", "Yes"],
+                horizontal=True,
+                key="q_has_rental_income",
             )
-    additional_dependant_count = len(additional_dependants_df.index)
-    additional_dependant_caregiver_claim_total = 0.0
-    additional_dependant_disability_transfer_available_total = 0.0
-    additional_dependant_medical_claim_total = 0.0
-    if not additional_dependants_df.empty:
-        adult_categories = {"Adult child", "Parent/Grandparent", "Other adult relative"}
-        additional_dependants_df["infirm_bool"] = additional_dependants_df["infirm"].eq("Yes")
-        additional_dependants_df["lived_with_you_bool"] = additional_dependants_df["lived_with_you"].eq("Yes")
-        additional_dependants_df["medical_claim_shared_bool"] = additional_dependants_df["medical_claim_shared"].eq("Yes")
-        additional_dependant_caregiver_claim_total = float(
-            additional_dependants_df.loc[
-                additional_dependants_df["infirm_bool"] & additional_dependants_df["category"].isin(adult_categories),
-                "caregiver_claim_amount",
-            ].sum()
-        )
-        additional_dependant_disability_transfer_available_total = float(
-            additional_dependants_df.loc[additional_dependants_df["infirm_bool"], "disability_transfer_available_amount"].sum()
-        )
-        additional_dependant_medical_claim_total = float(
-            additional_dependants_df.loc[
-                additional_dependants_df["lived_with_you_bool"] & ~additional_dependants_df["medical_claim_shared_bool"],
-                "medical_expenses_amount",
-            ].sum()
-        )
-    spouse_amount_claim = number_input(
-        "Optional Manual Spouse / Common-Law Claim Amount",
-        "spouse_amount_claim",
-        100.0,
-        "Leave at 0 to use the app's auto estimate. Enter the claim amount base only if you are overriding it manually.",
-    )
-    eligible_dependant_claim = number_input(
-        "Eligible Dependant Claim Amount",
-        "eligible_dependant_claim",
-        100.0,
-    )
-    age_amount_claim = number_input(
-        "Age Amount Claim",
-        "age_amount_claim",
-        100.0,
-        "Enter the claim amount base if applicable.",
-    )
-    t2202_tuition_total = float(t2202_wizard_totals.get("box26_total_eligible_tuition", 0.0)) or float(t2202_wizard_totals.get("box23_session_tuition", 0.0))
-    student_loan_interest = number_input("Student Loan Interest", "student_loan_interest", 50.0)
-    medical_expenses_eligible = number_input(
-        "Optional Manual Medical Claim Amount",
-        "medical_expenses_eligible",
-        100.0,
-        "Optional manual amount. For 2025, the estimator auto-calculates the claim from the medical expenses paid field below.",
-    )
-    medical_expenses_paid = number_input(
-        "Medical Expenses Paid",
-        "medical_expenses_paid",
-        100.0,
-        "For 2025, the estimator automatically subtracts the CRA threshold and uses the remaining eligible amount.",
-    )
-    charitable_donations = number_input("Charitable Donations", "charitable_donations", 100.0)
-    refundable_credits = number_input(
-        "Other Manual Refundable Credits",
-        "refundable_credits",
-        100.0,
-        "Use this for refundable credits not otherwise listed below.",
-    )
-    with st.expander("Less Common Claim Amounts", expanded=False):
-        st.caption("Open this only if you are entering a less common claim amount or an optional manual amount.")
-        disability_amount_claim = number_input(
-            "Disability Amount Claim",
-            "disability_amount_claim",
-            100.0,
-        )
-        tuition_amount_claim = number_input(
-            "Optional Tuition Manual Amount",
-            "tuition_amount_claim",
-            100.0,
-            "Leave at 0 to use the app's automatic current-year tuition amount. Enter a different amount only if you are following Schedule 11 manually.",
-        )
-        tuition_transfer_from_spouse = number_input(
-            "Tuition Transfer From Spouse",
-            "tuition_transfer_from_spouse",
-            100.0,
-        )
-        additional_federal_credits = number_input(
-            "Other Federal Non-Refundable Claim Amount",
-            "additional_federal_credits",
-            100.0,
-            "Enter other federal claim amount bases from CRA worksheets only if needed.",
-        )
-        additional_provincial_credit_amount = number_input(
-            f"Other {province_name} Non-Refundable Credit",
-            "additional_provincial_credit_amount",
-            100.0,
-            "Enter this as the final provincial credit amount in dollars.",
-        )
-    with st.expander("Refundable Credit Manual Amounts (Advanced)", expanded=False):
-        st.caption("Open this only if you are entering a manual amount instead of the app's auto estimate.")
-        refundable_col1, refundable_col2 = st.columns(2)
-        canada_workers_benefit = refundable_col1.number_input(
-            "Canada Workers Benefit Manual Amount",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("canada_workers_benefit", 0.0)),
-            key="canada_workers_benefit",
-            help="Leave at 0 to use the app's estimate. Enter your own amount only if you are following the worksheet manually.",
-        )
-        cwb_basic_eligible = refundable_col1.checkbox(
-            "Eligible for CWB",
-            value=bool(st.session_state.get("cwb_basic_eligible", False)),
-            key="cwb_basic_eligible",
-            help="Check this if you want the app to include an automatic Canada Workers Benefit estimate. If you leave this unchecked, the app will not auto-calculate line 45300.",
-        )
-        cwb_disability_supplement_eligible = refundable_col1.checkbox(
-            "Eligible for CWB Disability Supplement",
-            value=bool(st.session_state.get("cwb_disability_supplement_eligible", False)),
-            key="cwb_disability_supplement_eligible",
-            help="Check this if the taxpayer is eligible for the disability tax credit and you want the app to include the CWB disability supplement in the 2025 auto estimate.",
-        )
-        spouse_cwb_disability_supplement_eligible = False
-        if has_spouse_end_of_year:
-            spouse_cwb_disability_supplement_eligible = refundable_col1.checkbox(
-                "Spouse Also Eligible for CWB Disability Supplement",
-                value=bool(st.session_state.get("spouse_cwb_disability_supplement_eligible", False)),
-                key="spouse_cwb_disability_supplement_eligible",
-                help="Used only for the family-income phaseout path in the app's 2025 disability-supplement estimate.",
+            if rental_toggle == "Yes":
+                number_input("Net Rental Income", "net_rental_income", 500.0)
+            gains_toggle = st.radio(
+                "Do you have capital gains or losses not already captured on slips?",
+                ["No", "Yes"],
+                horizontal=True,
+                key="q_has_capital_gains",
             )
-        canada_training_credit_limit_available = refundable_col1.number_input(
-            "Canada Training Credit Limit Available",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("canada_training_credit_limit_available", 0.0)),
-            key="canada_training_credit_limit_available",
-            help="Used for automatic Canada Training Credit estimation against current-year tuition/training claims.",
-        )
-        canada_training_credit = refundable_col1.number_input(
-            "Canada Training Credit Manual Amount",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("canada_training_credit", 0.0)),
-            key="canada_training_credit",
-            help="Leave at 0 to use the app's estimate from the training credit limit and current-year tuition claim.",
-        )
-        medical_expense_supplement = refundable_col1.number_input(
-            "Medical Expense Supplement Manual Amount",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("medical_expense_supplement", 0.0)),
-            key="medical_expense_supplement",
-            help="Leave at 0 to use the app's estimate from employment income, net income, and the medical claim.",
-        )
-        other_federal_refundable_credits = refundable_col2.number_input(
-            "Other Federal Refundable Credits",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("other_federal_refundable_credits", 0.0)),
-            key="other_federal_refundable_credits",
-        )
-        manual_provincial_refundable_credits = refundable_col2.number_input(
-            f"Other {province_name} Refundable Credits",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("manual_provincial_refundable_credits", 0.0)),
-            key="manual_provincial_refundable_credits",
-        )
-    refundable_credits_engine_total = (
-        canada_workers_benefit
-        + canada_training_credit
-        + medical_expense_supplement
-        + other_federal_refundable_credits
-        + manual_provincial_refundable_credits
-        + refundable_credits
-    )
-    with st.expander("Province-Specific Credits And Schedules", expanded=False):
-        st.caption("Open this only if you are adding province-specific claim amounts or special schedule inputs.")
-        on_col1, on_col2, on_col3 = st.columns(3)
-        ontario_caregiver_amount = on_col1.number_input(
-            f"{province_name} Caregiver Claim Amount",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("provincial_caregiver_claim_amount", 0.0)),
-            key="provincial_caregiver_claim_amount",
-            help=PROVINCIAL_CAREGIVER_HELP.get(province, f"Enter the {province_name} caregiver or infirm dependant claim amount base if applicable."),
-        )
-        ontario_student_loan_interest = on_col1.number_input(
-            "Ontario Student Loan Interest",
-            min_value=0.0,
-            step=50.0,
-            value=float(st.session_state.get("ontario_student_loan_interest", 0.0)),
-            key="ontario_student_loan_interest",
-        )
-        ontario_tuition_transfer = on_col1.number_input(
-            "Ontario Tuition Transfer",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("ontario_tuition_transfer", 0.0)),
-            key="ontario_tuition_transfer",
-        )
-        ontario_disability_transfer = on_col2.number_input(
-            "Ontario Disability Transfer",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("ontario_disability_transfer", 0.0)),
-            key="ontario_disability_transfer",
-        )
-        ontario_adoption_expenses = on_col2.number_input(
-            "Ontario Adoption Expenses",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("ontario_adoption_expenses", 0.0)),
-            key="ontario_adoption_expenses",
-        )
-        ontario_medical_dependants = on_col2.number_input(
-            "Ontario Medical for Other Dependants",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("ontario_medical_dependants", 0.0)),
-            key="ontario_medical_dependants",
-            help="Enter medical expenses for other dependants. The Ontario limit is applied automatically for 2025.",
-        )
-        ontario_dependent_children_count = int(
-            on_col3.number_input(
-                f"{province_name} Dependent Children Count",
-                min_value=0,
-                step=1,
-                value=int(st.session_state.get("provincial_dependent_children_count", 0)),
-                key="provincial_dependent_children_count",
-                help="Used for Ontario tax reduction and for other province child-based reductions where built in.",
+            if gains_toggle == "Yes":
+                number_input("Additional Taxable Capital Gains", "taxable_capital_gains", 500.0)
+                number_input("Net Capital Loss Carryforward Used", "net_capital_loss_carryforward", 100.0)
+            other_income_toggle = st.radio(
+                "Do you have other taxable income not already shown on slips?",
+                ["No", "Yes"],
+                horizontal=True,
+                key="q_has_other_income",
             )
-        )
-        ontario_dependant_impairment_count = int(
-            on_col3.number_input(
-                "Ontario Impairment Dependants Count",
-                min_value=0,
-                step=1,
-                value=int(st.session_state.get("ontario_dependant_impairment_count", 0)),
-                key="ontario_dependant_impairment_count",
-                help="Additional Ontario tax reduction for qualifying dependants with an impairment.",
+            if other_income_toggle == "Yes":
+                number_input("Other Taxable Income", "other_income", 500.0)
+            investment_toggle = st.radio(
+                "Do you have extra interest or dividend income not already captured on slips?",
+                ["No", "Yes"],
+                horizontal=True,
+                key="q_has_investment_income",
             )
-        )
+            if investment_toggle == "Yes":
+                number_input("Manual Interest / Investment Income", "interest_income", 100.0)
+                number_input("Eligible Dividends", "eligible_dividends", 100.0)
+                number_input("Non-Eligible Dividends", "non_eligible_dividends", 100.0)
 
-    with st.expander("Foreign Tax And Dividend Credits", expanded=False):
-        st.caption("Open this only if you have extra foreign income, extra foreign tax paid, or are checking dividend-credit differences.")
-        fd_col1, fd_col2 = st.columns(2)
-        foreign_income = fd_col1.number_input(
-            "Manual Additional Foreign Income Not Already On Slips",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("foreign_income", 0.0)),
-            key="foreign_income",
-            help="Use this only for extra foreign non-business income not already captured by T5, T3, or T4PS slips. Do not repeat slip amounts here.",
-        )
-        foreign_tax_paid = fd_col1.number_input(
-            "Manual Additional Foreign Tax Paid Not Already On Slips",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("foreign_tax_paid", 0.0)),
-            key="foreign_tax_paid",
-            help="Use this only for extra foreign tax paid not already captured by T5 or T3 slips. Do not repeat slip amounts here.",
-        )
-        ontario_dividend_tax_credit_manual = fd_col2.number_input(
-            f"{province_name} Dividend Tax Credit Manual Amount",
-            min_value=0.0,
-            step=50.0,
-            value=float(st.session_state.get("provincial_dividend_tax_credit_manual", 0.0)),
-            key="provincial_dividend_tax_credit_manual",
-            help=f"Leave at 0 to use the auto-calculated {province_name} dividend tax credit where supported. Enter a higher amount only if your worksheet shows a different result.",
-        )
-        foreign_income += (
-            float(t5_wizard_totals.get("box15_foreign_income", 0.0))
-            + float(t3_wizard_totals.get("box25_foreign_income", 0.0))
-            + float(t4ps_wizard_totals.get("box37_foreign_non_business_income", 0.0))
-        )
-        foreign_tax_paid += (
-            float(t5_wizard_totals.get("box16_foreign_tax_paid", 0.0))
-            + float(t3_wizard_totals.get("box34_foreign_tax_paid", 0.0))
-        )
-        st.caption("Slip amounts from T5, T3, and T4PS are already added automatically. Only enter extra amounts missing from slips.")
+        with st.container(border=True):
+            st.markdown("#### Other Deductions And Credits")
+            if st.radio("Did you contribute to FHSA?", ["No", "Yes"], horizontal=True, key="q_has_fhsa") == "Yes":
+                number_input("FHSA Deduction Claimed", "fhsa_deduction", 500.0)
+            if st.radio("Did you have child care expenses?", ["No", "Yes"], horizontal=True, key="q_has_child_care") == "Yes":
+                number_input("Child Care Expenses", "child_care_expenses", 100.0)
+            if st.radio("Did you have moving expenses?", ["No", "Yes"], horizontal=True, key="q_has_moving") == "Yes":
+                number_input("Moving Expenses", "moving_expenses", 100.0)
+            if st.radio("Did you pay student loan interest?", ["No", "Yes"], horizontal=True, key="q_has_student_loan") == "Yes":
+                number_input("Student Loan Interest", "student_loan_interest", 50.0)
+            if st.radio("Do you have tuition or a T2202?", ["No", "Yes"], horizontal=True, key="q_has_tuition") == "Yes":
+                number_input("Optional Additional Tuition Amount", "tuition_amount_claim", 100.0)
+        with st.container(border=True):
+            st.markdown("#### Dependants")
+            if st.radio("Are you supporting a dependant you may claim?", ["No", "Yes"], horizontal=True, key="q_has_dependant") == "Yes":
+                st.checkbox("Check eligible dependant amount", value=bool(st.session_state.get("eligible_dependant_claim_enabled", True)), key="eligible_dependant_claim_enabled")
+                st.selectbox("Dependant Relationship", ["Child", "Parent/Grandparent", "Other relative", "Other"], key="dependant_relationship")
+                st.selectbox("Dependant Type", ["Minor child", "Adult child", "Parent/Grandparent", "Other adult relative", "Other"], key="dependant_category")
+                st.checkbox("Dependant lived with you", key="dependant_lived_with_you")
+                number_input("Dependant Net Income", "eligible_dependant_net_income", 100.0)
 
-        with st.expander("Advanced Foreign Tax Manual Amounts", expanded=False):
-            st.caption("Leave all manual amounts at 0 unless you are checking the T2209 or T2036 worksheet manually.")
-            ftc_col1, ftc_col2, ftc_col3 = st.columns(3)
-            t2209_non_business_tax_paid = ftc_col1.number_input(
-                "T2209 Line 1 Non-Business Tax Paid Manual Amount",
-                min_value=0.0,
-                step=100.0,
-                value=float(st.session_state.get("t2209_non_business_tax_paid", 0.0)),
-                key="t2209_non_business_tax_paid",
-                help="Optional. Leave this at 0 unless you are working from the T2209 form and want to override the foreign-tax total used by the app.",
-            )
-            t2209_net_foreign_non_business_income = ftc_col1.number_input(
-                "T2209 Line 2 Net Foreign Non-Business Income Manual Amount",
-                min_value=0.0,
-                step=100.0,
-                value=float(st.session_state.get("t2209_net_foreign_non_business_income", 0.0)),
-                key="t2209_net_foreign_non_business_income",
-                help="Optional. Leave this at 0 unless you are following T2209 directly and want to override the foreign-income amount used by the app.",
-            )
-            t2209_net_income_override = ftc_col2.number_input(
-                "T2209 Net Income Manual Amount",
-                min_value=0.0,
-                step=100.0,
-                value=float(st.session_state.get("t2209_net_income_override", 0.0)),
-                key="t2209_net_income_override",
-                help="Advanced override. Leave at 0 unless you are checking the T2209 worksheet line by line.",
-            )
-            t2209_basic_federal_tax_override = ftc_col2.number_input(
-                "T2209 Basic Federal Tax Manual Amount",
-                min_value=0.0,
-                step=100.0,
-                value=float(st.session_state.get("t2209_basic_federal_tax_override", 0.0)),
-                key="t2209_basic_federal_tax_override",
-                help="Advanced override. Leave at 0 unless your own T2209 worksheet uses a different federal tax amount.",
-            )
-            t2036_provincial_tax_otherwise_payable_override = ftc_col3.number_input(
-                "T2036 Provincial Tax Otherwise Payable Manual Amount",
-                min_value=0.0,
-                step=100.0,
-                value=float(st.session_state.get("t2036_provincial_tax_otherwise_payable_override", 0.0)),
-                key="t2036_provincial_tax_otherwise_payable_override",
-                help="Optional override for the T2036 provincial tax otherwise payable amount.",
-            )
+persist_mvp_question_state()
+normalize_ontario_mvp_hidden_state()
 
-    with st.expander("Detailed Donation Worksheet Inputs (Less Common)", expanded=False):
-        st.caption("Open this only if you need Schedule 9 detail beyond the regular donation amount above.")
-        don_col1, don_col2, don_col3 = st.columns(3)
-        donations_eligible_total = number_input(
-            "Schedule 9 Regular Donations",
-            "donations_eligible_total",
-            100.0,
-            "Leave at 0 to use the Charitable Donations amount above.",
-        )
-        ecological_cultural_gifts = number_input(
-            "Ecological / Cultural Gifts",
-            "ecological_cultural_gifts",
-            100.0,
-        )
-        ecological_gifts_pre2016 = number_input(
-            "Pre-2016 Ecological Gifts Included Above",
-            "ecological_gifts_pre2016",
-            100.0,
-        )
+employment_income_manual = get_state_number("employment_income")
+pension_income_manual = get_state_number("pension_income")
+rrsp_rrif_income_manual = get_state_number("rrsp_rrif_income")
+other_income_manual = get_state_number("other_income")
+manual_net_rental_income = get_state_number("net_rental_income")
+manual_taxable_capital_gains = get_state_number("taxable_capital_gains")
+interest_income_manual = get_state_number("interest_income")
+eligible_dividends = get_state_number("eligible_dividends")
+non_eligible_dividends = get_state_number("non_eligible_dividends")
+t5_eligible_dividends_taxable = get_state_number("t5_eligible_dividends_taxable")
+t5_non_eligible_dividends_taxable = get_state_number("t5_non_eligible_dividends_taxable")
+t5_federal_dividend_credit = get_state_number("t5_federal_dividend_credit")
+t3_eligible_dividends_taxable = get_state_number("t3_eligible_dividends_taxable")
+t3_non_eligible_dividends_taxable = get_state_number("t3_non_eligible_dividends_taxable")
+t3_federal_dividend_credit = get_state_number("t3_federal_dividend_credit")
+t2202_tuition_total = float(t2202_wizard_totals.get("box26_total_eligible_tuition", 0.0))
+rrsp_deduction = get_state_number("rrsp_deduction")
+fhsa_deduction = get_state_number("fhsa_deduction")
+rpp_contribution = get_state_number("rpp_contribution") + float(t4_wizard_totals.get("box20_rpp", 0.0))
+union_dues = get_state_number("union_dues") + float(t4_wizard_totals.get("box44_union_dues", 0.0))
+child_care_expenses = get_state_number("child_care_expenses")
+moving_expenses = get_state_number("moving_expenses")
+support_payments_deduction = get_state_number("support_payments_deduction")
+carrying_charges = get_state_number("carrying_charges")
+other_employment_expenses = get_state_number("other_employment_expenses")
+other_deductions = get_state_number("other_deductions")
+net_capital_loss_carryforward = get_state_number("net_capital_loss_carryforward")
+other_loss_carryforward = get_state_number("other_loss_carryforward")
+spouse_amount_claim = get_state_number("spouse_amount_claim")
+spouse_net_income = get_state_number("spouse_net_income")
+spouse_claim_enabled = get_state_bool("spouse_claim_enabled")
+spouse_infirm = get_state_bool("spouse_infirm")
+has_spouse_end_of_year = get_state_bool("has_spouse_end_of_year")
+separated_in_year = get_state_bool("separated_in_year")
+support_payments_to_spouse = get_state_bool("support_payments_to_spouse")
+eligible_dependant_claim = get_state_number("eligible_dependant_claim")
+eligible_dependant_net_income = get_state_number("eligible_dependant_net_income")
+eligible_dependant_claim_enabled = get_state_bool("eligible_dependant_claim_enabled")
+eligible_dependant_infirm = get_state_bool("eligible_dependant_infirm")
+dependant_relationship = get_state_text("dependant_relationship", "Child")
+dependant_category = get_state_text("dependant_category", "Minor child")
+dependant_lived_with_you = get_state_bool("dependant_lived_with_you")
+paid_child_support_for_dependant = get_state_bool("paid_child_support_for_dependant")
+shared_custody_claim_agreement = get_state_bool("shared_custody_claim_agreement")
+another_household_member_claims_dependant = get_state_bool("another_household_member_claims_dependant")
+another_household_member_claims_caregiver = get_state_bool("another_household_member_claims_caregiver")
+another_household_member_claims_disability_transfer = get_state_bool("another_household_member_claims_disability_transfer")
+medical_dependant_claim_shared = get_state_bool("medical_dependant_claim_shared")
+spouse_disability_transfer_available = get_state_bool("spouse_disability_transfer_available")
+spouse_disability_transfer_available_amount = get_state_number("spouse_disability_transfer_available_amount")
+dependant_disability_transfer_available = get_state_bool("dependant_disability_transfer_available")
+dependant_disability_transfer_available_amount = get_state_number("dependant_disability_transfer_available_amount")
+additional_dependants_df = pd.DataFrame(columns=["dependant_label", "category", "infirm", "lived_with_you", "caregiver_claim_amount", "disability_transfer_available_amount", "medical_expenses_amount", "medical_claim_shared"])
+additional_dependant_count = 0
+additional_dependant_caregiver_claim_total = 0.0
+additional_dependant_disability_transfer_available_total = 0.0
+additional_dependant_medical_claim_total = 0.0
+caregiver_claim_target = get_state_text("caregiver_claim_target", "Auto")
+disability_transfer_source = get_state_text("disability_transfer_source", "Auto")
+disability_amount_claim = get_state_number("disability_amount_claim")
+age_amount_claim = get_state_number("age_amount_claim")
+student_loan_interest = get_state_number("student_loan_interest")
+medical_expenses_eligible = get_state_number("medical_expenses_eligible")
+medical_expenses_paid = get_state_number("medical_expenses_paid")
+charitable_donations = get_state_number("charitable_donations")
+refundable_credits = get_state_number("refundable_credits")
+tuition_amount_claim = get_state_number("tuition_amount_claim")
+tuition_transfer_from_spouse = get_state_number("tuition_transfer_from_spouse")
+additional_federal_credits = get_state_number("additional_federal_credits")
+additional_provincial_credit_amount = get_state_number("additional_provincial_credit_amount")
+canada_workers_benefit = get_state_number("canada_workers_benefit")
+cwb_basic_eligible = get_state_bool("cwb_basic_eligible")
+cwb_disability_supplement_eligible = get_state_bool("cwb_disability_supplement_eligible")
+spouse_cwb_disability_supplement_eligible = get_state_bool("spouse_cwb_disability_supplement_eligible")
+canada_training_credit_limit_available = get_state_number("canada_training_credit_limit_available")
+canada_training_credit = get_state_number("canada_training_credit")
+medical_expense_supplement = get_state_number("medical_expense_supplement")
+other_federal_refundable_credits = get_state_number("other_federal_refundable_credits")
+manual_provincial_refundable_credits = get_state_number("manual_provincial_refundable_credits")
+ontario_caregiver_amount = get_state_number("provincial_caregiver_claim_amount")
+ontario_student_loan_interest = get_state_number("ontario_student_loan_interest")
+ontario_tuition_transfer = get_state_number("ontario_tuition_transfer")
+ontario_disability_transfer = get_state_number("ontario_disability_transfer")
+ontario_adoption_expenses = get_state_number("ontario_adoption_expenses")
+ontario_medical_dependants = get_state_number("ontario_medical_dependants")
+ontario_dependent_children_count = int(st.session_state.get("provincial_dependent_children_count", 0) or 0)
+ontario_dependant_impairment_count = int(st.session_state.get("ontario_dependant_impairment_count", 0) or 0)
+foreign_income = get_state_number("foreign_income") + float(t5_wizard_totals.get("box15_foreign_income", 0.0)) + float(t3_wizard_totals.get("box25_foreign_income", 0.0)) + float(t4ps_wizard_totals.get("box37_foreign_non_business_income", 0.0))
+foreign_tax_paid = get_state_number("foreign_tax_paid") + float(t5_wizard_totals.get("box16_foreign_tax_paid", 0.0)) + float(t3_wizard_totals.get("box34_foreign_tax_paid", 0.0))
+t2209_non_business_tax_paid = get_state_number("t2209_non_business_tax_paid")
+t2209_net_foreign_non_business_income = get_state_number("t2209_net_foreign_non_business_income")
+t2209_net_income_override = get_state_number("t2209_net_income_override")
+t2209_basic_federal_tax_override = get_state_number("t2209_basic_federal_tax_override")
+t2036_provincial_tax_otherwise_payable_override = get_state_number("t2036_provincial_tax_otherwise_payable_override")
+ontario_dividend_tax_credit_manual = get_state_number("provincial_dividend_tax_credit_manual")
+donations_eligible_total = get_state_number("donations_eligible_total")
+ecological_cultural_gifts = get_state_number("ecological_cultural_gifts")
+ecological_gifts_pre2016 = get_state_number("ecological_gifts_pre2016")
+income_tax_withheld = get_state_number("income_tax_withheld")
+cpp_withheld = get_state_number("cpp_withheld")
+ei_withheld = get_state_number("ei_withheld")
+installments_paid = get_state_number("installments_paid")
+other_payments = get_state_number("other_payments")
+ontario_fertility_treatment_expenses = get_state_number("ontario_fertility_treatment_expenses")
+ontario_seniors_public_transit_expenses = get_state_number("ontario_seniors_public_transit_expenses")
+bc_renters_credit_eligible = get_state_bool("bc_renters_credit_eligible")
+bc_home_renovation_expenses = get_state_number("bc_home_renovation_expenses")
+bc_home_renovation_eligible = get_state_bool("bc_home_renovation_eligible")
+sk_fertility_treatment_expenses = get_state_number("sk_fertility_treatment_expenses")
+pe_volunteer_credit_eligible = get_state_bool("pe_volunteer_credit_eligible")
+mb479_personal_tax_credit = get_state_number("mb479_personal_tax_credit")
+mb479_homeowners_affordability_credit = get_state_number("mb479_homeowners_affordability_credit")
+mb479_renters_affordability_credit = get_state_number("mb479_renters_affordability_credit")
+mb479_seniors_school_rebate = get_state_number("mb479_seniors_school_rebate")
+mb479_primary_caregiver_credit = get_state_number("mb479_primary_caregiver_credit")
+mb479_fertility_treatment_expenses = get_state_number("mb479_fertility_treatment_expenses")
+ns479_volunteer_credit = get_state_number("ns479_volunteer_credit")
+ns479_childrens_sports_arts_credit = get_state_number("ns479_childrens_sports_arts_credit")
+nb_political_contribution_credit = get_state_number("nb_political_contribution_credit")
+nb_small_business_investor_credit = get_state_number("nb_small_business_investor_credit")
+nb_lsvcc_credit = get_state_number("nb_lsvcc_credit")
+nb_seniors_home_renovation_expenses = get_state_number("nb_seniors_home_renovation_expenses")
+nl_political_contribution_credit = get_state_number("nl_political_contribution_credit")
+nl_direct_equity_credit = get_state_number("nl_direct_equity_credit")
+nl_resort_property_credit = get_state_number("nl_resort_property_credit")
+nl_venture_capital_credit = get_state_number("nl_venture_capital_credit")
+nl_unused_venture_capital_credit = get_state_number("nl_unused_venture_capital_credit")
+nl479_other_refundable_credits = get_state_number("nl479_other_refundable_credits")
 
-    with st.expander("Carryforwards And Transfers", expanded=False):
-        st.caption("Open this only if you are bringing forward older tuition, donation, or provincial credit amounts.")
-        carryforward_tabs = st.tabs(["Tuition Carryforward", "Donation Carryforward", f"{province_name} Credit Lines"])
-        with carryforward_tabs[0]:
-            tuition_cf_df = render_record_card_editor(
-                "Tuition Carryforward by Year",
-                "tuition_carryforwards",
-                [
-                    {"id": "tax_year", "label": "Tax Year", "step": 1.0},
-                    {"id": "available_amount", "label": "Available Amount", "step": 100.0},
-                    {"id": "claim_amount", "label": "Claim Amount", "step": 100.0},
-                ],
-                "Enter one row per carryforward year. Requested claims are capped to the available amount and flow into the Schedule 11 worksheet.",
-            )
-        with carryforward_tabs[1]:
-            donation_cf_df = render_record_card_editor(
-                "Donation Carryforward by Year",
-                "donation_carryforwards",
-                [
-                    {"id": "tax_year", "label": "Tax Year", "step": 1.0},
-                    {"id": "available_amount", "label": "Available Amount", "step": 100.0},
-                    {"id": "claim_amount", "label": "Claim Amount", "step": 100.0},
-                ],
-                "Enter one row per donation carryforward year. Claim amounts are added to Schedule 9 regular donations.",
-            )
-        with carryforward_tabs[2]:
-            provincial_credit_lines_df = render_record_card_editor(
-                f"{province_name} Additional Credit Lines",
-                "provincial_credit_lines",
-                [
-                    {"id": "line_code", "label": "Line Code", "step": 1.0},
-                    {"id": "amount", "label": "Amount", "step": 100.0},
-                ],
-                "Use this for province-specific credit lines not otherwise modelled. Amounts are added to provincial non-refundable credits.",
-            )
-        st.markdown("#### Province Special Schedules")
-        st.caption("Open this only if you need special province worksheet inputs that are not already covered above.")
-        sp_col1, sp_col2, sp_col3 = st.columns(3)
-    mb479_personal_tax_credit = 0.0
-    mb479_homeowners_affordability_credit = 0.0
-    mb479_renters_affordability_credit = 0.0
-    mb479_seniors_school_rebate = 0.0
-    mb479_primary_caregiver_credit = 0.0
-    mb479_fertility_treatment_expenses = 0.0
-    ns479_volunteer_credit = 0.0
-    ns479_childrens_sports_arts_credit = 0.0
-    ontario_fertility_treatment_expenses = 0.0
-    ontario_seniors_public_transit_expenses = 0.0
-    bc_renters_credit_eligible = False
-    bc_home_renovation_expenses = 0.0
-    bc_home_renovation_eligible = False
-    sk_fertility_treatment_expenses = 0.0
-    pe_volunteer_credit_eligible = False
-    nb_political_contribution_credit = 0.0
-    nb_small_business_investor_credit = 0.0
-    nb_lsvcc_credit = 0.0
-    nb_seniors_home_renovation_expenses = 0.0
-    nl_political_contribution_credit = 0.0
-    nl_direct_equity_credit = 0.0
-    nl_resort_property_credit = 0.0
-    nl_venture_capital_credit = 0.0
-    nl_unused_venture_capital_credit = 0.0
-    nl479_other_refundable_credits = 0.0
+q_has_spouse_answer = "Yes" if bool(st.session_state.get("mvp_has_spouse_end_of_year", False)) else "No"
+q_check_cwb_answer = "Yes" if bool(st.session_state.get("mvp_check_cwb", False)) else "No"
+has_spouse_end_of_year_effective = bool(st.session_state.get("mvp_has_spouse_end_of_year", False))
+spouse_claim_enabled_effective = has_spouse_end_of_year_effective and bool(st.session_state.get("mvp_spouse_claim_enabled", False))
+spouse_net_income = float(st.session_state.get("mvp_spouse_net_income", spouse_net_income) or 0.0)
+cwb_basic_eligible_effective = bool(st.session_state.get("mvp_check_cwb", False)) and bool(st.session_state.get("mvp_cwb_basic_eligible", False))
+cwb_disability_supplement_eligible = bool(st.session_state.get("mvp_cwb_disability_supplement_eligible", cwb_disability_supplement_eligible))
+spouse_cwb_disability_supplement_eligible = bool(
+    st.session_state.get("mvp_spouse_cwb_disability_supplement_eligible", spouse_cwb_disability_supplement_eligible)
+)
 
-    if province == "MB":
-        mb479_personal_tax_credit = number_input("MB479 Personal Tax Credit", "mb479_personal_tax_credit", 50.0)
-        mb479_homeowners_affordability_credit = number_input("MB479 Homeowners Affordability Credit", "mb479_homeowners_affordability_credit", 50.0)
-        mb479_renters_affordability_credit = number_input("MB479 Renters Affordability Credit", "mb479_renters_affordability_credit", 50.0)
-        mb479_seniors_school_rebate = number_input("MB479 Seniors School Tax Rebate", "mb479_seniors_school_rebate", 50.0)
-        mb479_primary_caregiver_credit = number_input("MB479 Primary Caregiver Tax Credit", "mb479_primary_caregiver_credit", 50.0)
-        mb479_fertility_treatment_expenses = number_input(
-            "MB479 Fertility Treatment Expenses",
-            "mb479_fertility_treatment_expenses",
-            100.0,
-            "The estimator applies a 40% Manitoba fertility treatment credit, capped at $16,000.",
-        )
-    elif province == "NS":
-        volunteer_flag = st.checkbox(
-            "NS479 Volunteer Firefighter / Search and Rescue Credit",
-            value=bool(st.session_state.get("ns479_volunteer_flag", False)),
-            key="ns479_volunteer_flag",
-            help="If eligible, the app enters the fixed $500 NS479 credit.",
-        )
-        ns479_volunteer_credit = 500.0 if volunteer_flag else 0.0
-        ns479_childrens_sports_arts_credit = number_input(
-            "NS479 Children's Sports and Arts Credit",
-            "ns479_childrens_sports_arts_credit",
-            50.0,
-            "Enter the final credit amount from your NS479 worksheet if applicable.",
-        )
-    elif province == "ON":
-        ontario_fertility_treatment_expenses = number_input(
-            "ON479 Fertility Treatment Expenses",
-            "ontario_fertility_treatment_expenses",
-            100.0,
-            "The estimator applies the Ontario refundable fertility treatment tax credit to eligible expenses.",
-        )
-        ontario_seniors_public_transit_expenses = number_input(
-            "ON479 Seniors' Public Transit Expenses",
-            "ontario_seniors_public_transit_expenses",
-            100.0,
-            "The estimator applies the Ontario seniors' public transit tax credit if age 65 or older.",
-        )
-    elif province == "BC":
-        bc_renters_credit_eligible = sp_col1.checkbox(
-            "BC Renter's Tax Credit Eligible",
-            value=bool(st.session_state.get("bc_renters_credit_eligible", False)),
-            key="bc_renters_credit_eligible",
-            help="Check if the taxpayer qualifies to claim the B.C. renter's tax credit.",
-        )
-        bc_home_renovation_eligible = sp_col2.checkbox(
-            "BC Home Renovation Credit Eligible",
-            value=bool(st.session_state.get("bc_home_renovation_eligible", False)),
-            key="bc_home_renovation_eligible",
-            help="Check if the taxpayer or qualifying household qualifies for the B.C. home renovation credit.",
-        )
-        bc_home_renovation_expenses = number_input(
-            "BC Home Renovation Eligible Expenses",
-            "bc_home_renovation_expenses",
-            100.0,
-            "The estimator applies the B.C. refundable home renovation credit to eligible expenses.",
-        )
-    elif province == "SK":
-        sk_fertility_treatment_expenses = number_input(
-            "SK479 Fertility Treatment Expenses",
-            "sk_fertility_treatment_expenses",
-            100.0,
-            "The estimator applies the Saskatchewan refundable fertility treatment tax credit to eligible expenses.",
-        )
-    elif province == "PE":
-        pe_volunteer_credit_eligible = sp_col1.checkbox(
-            "PE Volunteer Firefighter / Search and Rescue Credit Eligible",
-            value=bool(st.session_state.get("pe_volunteer_credit_eligible", False)),
-            key="pe_volunteer_credit_eligible",
-            help="Check if the taxpayer qualifies for the Prince Edward Island volunteer firefighter or volunteer search and rescue personnel tax credit.",
-        )
-    elif province == "NB":
-        nb_political_contribution_credit = number_input("NB428 Political Contribution Credit", "nb_political_contribution_credit", 50.0)
-        nb_small_business_investor_credit = number_input("NB428 Small Business Investor Credit", "nb_small_business_investor_credit", 50.0)
-        nb_lsvcc_credit = number_input("NB428 Labour-Sponsored Venture Capital Credit", "nb_lsvcc_credit", 50.0)
-        nb_seniors_home_renovation_expenses = number_input(
-            "NB(S12) Seniors' Home Renovation Expenses",
-            "nb_seniors_home_renovation_expenses",
-            100.0,
-            "The estimator applies the 10% refundable credit up to $10,000 of eligible expenses.",
-        )
-    elif province == "NL":
-        nl_political_contribution_credit = number_input("NL428 Political Contribution Credit", "nl_political_contribution_credit", 50.0)
-        nl_direct_equity_credit = number_input("NL428 Direct Equity Tax Credit", "nl_direct_equity_credit", 50.0)
-        nl_resort_property_credit = number_input("NL428 Resort Property Investment Credit", "nl_resort_property_credit", 50.0)
-        nl_venture_capital_credit = number_input("NL428 Venture Capital Credit", "nl_venture_capital_credit", 50.0)
-        nl_unused_venture_capital_credit = number_input("NL428 Unused Venture Capital Credit", "nl_unused_venture_capital_credit", 50.0)
-        nl479_other_refundable_credits = number_input("NL479 Other Refundable Credits", "nl479_other_refundable_credits", 50.0)
-tuition_cf_df = coerce_editor_df(tuition_cf_df, ["tax_year", "available_amount", "claim_amount"])
-donation_cf_df = coerce_editor_df(donation_cf_df, ["tax_year", "available_amount", "claim_amount"])
-provincial_credit_lines_df = coerce_editor_df(provincial_credit_lines_df, ["line_code", "amount"])
-tuition_carryforward_available_total = float(tuition_cf_df["available_amount"].sum())
-tuition_carryforward_claim_requested = float(tuition_cf_df["claim_amount"].sum())
-tuition_carryforward_claim_total = min(tuition_carryforward_available_total, tuition_carryforward_claim_requested)
-tuition_carryforward_unused = max(0.0, tuition_carryforward_available_total - tuition_carryforward_claim_total)
-donation_carryforward_available_total = float(donation_cf_df["available_amount"].sum())
-donation_carryforward_claim_requested = float(donation_cf_df["claim_amount"].sum())
+employment_income = employment_income_manual + float(t4_wizard_totals.get("box14_employment_income", 0.0))
+pension_income = pension_income_manual + float(t4a_wizard_totals.get("box16_pension", 0.0)) + float(t3_wizard_totals.get("box31_pension_income", 0.0))
+other_income = other_income_manual + rrsp_rrif_income_manual + float(t4a_wizard_totals.get("box18_lump_sum", 0.0)) + float(t4a_wizard_totals.get("box28_other_income", 0.0)) + float(t3_wizard_totals.get("box26_other_income", 0.0)) + float(t4ps_wizard_totals.get("box35_other_employment_income", 0.0))
+net_rental_income = manual_net_rental_income + t776_net_rental_income
+taxable_capital_gains = manual_taxable_capital_gains + schedule3_taxable_capital_gains
+interest_income = interest_income_manual + float(t5_wizard_totals.get("box13_interest", 0.0))
+t5_eligible_dividends_taxable += float(t5_wizard_totals.get("box25_eligible_dividends_taxable", 0.0)) + float(t4ps_wizard_totals.get("box31_eligible_dividends_taxable", 0.0))
+t5_non_eligible_dividends_taxable += float(t5_wizard_totals.get("box11_non_eligible_dividends_taxable", 0.0)) + float(t4ps_wizard_totals.get("box25_non_eligible_dividends_taxable", 0.0))
+federal_dividend_credit_slip_total = float(t5_wizard_totals.get("box26_eligible_dividend_credit", 0.0)) + float(t5_wizard_totals.get("box12_non_eligible_dividend_credit", 0.0)) + float(t3_wizard_totals.get("box51_eligible_dividend_credit", 0.0)) + float(t3_wizard_totals.get("box39_non_eligible_dividend_credit", 0.0)) + float(t4ps_wizard_totals.get("box32_eligible_dividend_credit", 0.0)) + float(t4ps_wizard_totals.get("box26_non_eligible_dividend_credit", 0.0))
+t5_federal_dividend_credit += float(t5_wizard_totals.get("box26_eligible_dividend_credit", 0.0)) + float(t5_wizard_totals.get("box12_non_eligible_dividend_credit", 0.0)) + float(t4ps_wizard_totals.get("box26_non_eligible_dividend_credit", 0.0)) + float(t4ps_wizard_totals.get("box32_eligible_dividend_credit", 0.0))
+t3_eligible_dividends_taxable += float(t3_wizard_totals.get("box50_eligible_dividends_taxable", 0.0))
+t3_non_eligible_dividends_taxable += float(t3_wizard_totals.get("box32_non_eligible_dividends_taxable", 0.0))
+t3_federal_dividend_credit += float(t3_wizard_totals.get("box51_eligible_dividend_credit", 0.0)) + float(t3_wizard_totals.get("box39_non_eligible_dividend_credit", 0.0))
+t4_reference_box24_total = float(t4_wizard_totals.get("box24_ei_insurable_earnings", 0.0))
+t4_reference_box26_total = float(t4_wizard_totals.get("box26_cpp_pensionable_earnings", 0.0))
+t4_reference_box52_total = float(t4_wizard_totals.get("box52_pension_adjustment", 0.0))
+
+tuition_cf_df = coerce_editor_df(pd.DataFrame(columns=["tax_year", "available_amount", "claim_amount"]), ["tax_year", "available_amount", "claim_amount"])
+donation_cf_df = coerce_editor_df(pd.DataFrame(columns=["tax_year", "available_amount", "claim_amount"]), ["tax_year", "available_amount", "claim_amount"])
+provincial_credit_lines_df = coerce_editor_df(pd.DataFrame(columns=["line_code", "amount"]), ["line_code", "amount"])
+tuition_carryforward_available_total = 0.0
+tuition_carryforward_claim_requested = 0.0
+tuition_carryforward_claim_total = 0.0
+tuition_carryforward_unused = 0.0
+donation_carryforward_available_total = 0.0
+donation_carryforward_claim_requested = 0.0
 donation_carryforward_claim_total = 0.0
-donation_carryforward_unused = donation_carryforward_available_total
-provincial_credit_lines_total = float(provincial_credit_lines_df["amount"].sum())
+donation_carryforward_unused = 0.0
+provincial_credit_lines_total = 0.0
 schedule11_current_year_tuition_available = t2202_tuition_total
-schedule11_current_year_claim_requested = (
-    schedule11_current_year_tuition_available
-    if tuition_amount_claim == 0.0
-    else tuition_amount_claim
-)
-schedule11_current_year_claim_used = min(
-    schedule11_current_year_tuition_available,
-    schedule11_current_year_claim_requested,
-)
+schedule11_current_year_claim_requested = schedule11_current_year_tuition_available if tuition_amount_claim == 0.0 else tuition_amount_claim
+schedule11_current_year_claim_used = min(schedule11_current_year_tuition_available, schedule11_current_year_claim_requested)
 schedule9_current_year_donations_available = max(donations_eligible_total, charitable_donations)
 schedule9_current_year_donations_claim_requested = schedule9_current_year_donations_available
 schedule9_current_year_donations_claim_used = 0.0
 schedule9_current_year_donations_unused = schedule9_current_year_donations_available
 schedule9_total_regular_donations_claimed = 0.0
-schedule9_total_regular_donations_unused = schedule9_current_year_donations_available + donation_carryforward_available_total
-
-with st.expander("5) Payments and Withholdings (Optional)", expanded=False):
-    st.caption("You can skip this section unless you made instalments, had extra tax deducted outside slips, or need to add other payments not already captured from your slips.")
-    pay_col1, pay_col2, pay_col3 = st.columns(3)
-    income_tax_withheld = number_input("Other Income Tax Deducted at Source (line 43700)", "income_tax_withheld", 100.0)
-    cpp_withheld = number_input(
-        "CPP Withheld on Slips",
-        "cpp_withheld",
-        100.0,
-        "Optional override reference only. The estimator still calculates CPP from income sources.",
-    )
-    ei_withheld = number_input(
-        "EI Withheld on Slips",
-        "ei_withheld",
-        100.0,
-        "Optional override reference only. The estimator still calculates EI from employment income.",
-    )
-    installments_paid = number_input("Tax Instalments Paid (line 47600)", "installments_paid", 100.0)
-    other_payments = number_input("Other Tax Payments / Credits", "other_payments", 100.0)
-    income_tax_withheld_total = (
-        income_tax_withheld
-        + float(t4_wizard_totals.get("box22_tax_withheld", 0.0))
-        + float(t4a_wizard_totals.get("box22_tax_withheld", 0.0))
-    )
-    cpp_withheld_total = cpp_withheld + float(t4_wizard_totals.get("box16_cpp", 0.0))
-    ei_withheld_total = ei_withheld + float(t4_wizard_totals.get("box18_ei", 0.0))
-    render_metric_row(
-        [
-            ("Tax Withheld incl. Slips", income_tax_withheld_total),
-            ("CPP Withheld incl. T4", cpp_withheld_total),
-            ("EI Withheld incl. T4", ei_withheld_total),
-        ],
-        3,
-    )
+schedule9_total_regular_donations_unused = schedule9_current_year_donations_available
+income_tax_withheld_total = income_tax_withheld + float(t4_wizard_totals.get("box22_tax_withheld", 0.0)) + float(t4a_wizard_totals.get("box22_tax_withheld", 0.0))
+cpp_withheld_total = cpp_withheld + float(t4_wizard_totals.get("box16_cpp", 0.0))
+ei_withheld_total = ei_withheld + float(t4_wizard_totals.get("box18_ei", 0.0))
+refundable_credits_engine_total = canada_workers_benefit + canada_training_credit + medical_expense_supplement + other_federal_refundable_credits + manual_provincial_refundable_credits + refundable_credits
 
 t4_params = TAX_CONFIGS[tax_year]
 estimator_ei_insurable_earnings = min(employment_income, t4_params["ei_max_insurable_earnings"])
@@ -3028,19 +2612,19 @@ estimated_spouse_adjusted_net_income_for_cwb = max(
     0.0,
     spouse_net_income + spouse_line_21300 + spouse_rdsp_repayment - spouse_uccb - spouse_rdsp_income,
 )
-if cwb_basic_eligible:
+if cwb_basic_eligible_effective:
     auto_canada_workers_benefit_preview = calculate_canada_workers_benefit(
         tax_year=tax_year,
         working_income=employment_income,
         adjusted_net_income=estimated_adjusted_net_income_for_cwb,
         spouse_adjusted_net_income=estimated_spouse_adjusted_net_income_for_cwb,
-        has_spouse=has_spouse_end_of_year,
+        has_spouse=has_spouse_end_of_year_effective,
     )
     auto_cwb_disability_supplement_preview = calculate_cwb_disability_supplement(
         tax_year=tax_year,
         adjusted_net_income=estimated_adjusted_net_income_for_cwb,
         spouse_adjusted_net_income=estimated_spouse_adjusted_net_income_for_cwb,
-        has_spouse=has_spouse_end_of_year,
+        has_spouse=has_spouse_end_of_year_effective,
         is_disabled=cwb_disability_supplement_eligible,
         spouse_is_disabled=spouse_cwb_disability_supplement_eligible,
     )
@@ -3106,7 +2690,7 @@ diagnostics = collect_diagnostics(
         "t3_pension_total": float(t3_wizard_totals.get("box31_pension_income", 0.0)),
         "schedule3_taxable_capital_gains": schedule3_taxable_capital_gains,
         "t2202_tuition_total": t2202_tuition_total,
-        "t2202_months_total": float(t2202_wizard_totals.get("box21_months_part_time", 0.0)) + float(t2202_wizard_totals.get("box22_months_full_time", 0.0)) + float(t2202_wizard_totals.get("box24_total_months_part_time", 0.0)) + float(t2202_wizard_totals.get("box25_total_months_full_time", 0.0)),
+        "t2202_months_total": float(t2202_wizard_totals.get("box24_total_months_part_time", 0.0)) + float(t2202_wizard_totals.get("box25_total_months_full_time", 0.0)),
         "t776_net_rental_income": t776_net_rental_income,
         "slip_foreign_income_total": float(t5_wizard_totals.get("box15_foreign_income", 0.0)) + float(t3_wizard_totals.get("box25_foreign_income", 0.0)) + float(t4ps_wizard_totals.get("box37_foreign_non_business_income", 0.0)),
         "slip_foreign_tax_paid_total": float(t5_wizard_totals.get("box16_foreign_tax_paid", 0.0)) + float(t3_wizard_totals.get("box34_foreign_tax_paid", 0.0)),
@@ -3173,22 +2757,140 @@ diagnostics = collect_diagnostics(
     }
 )
 
-with st.expander("Pre-Calculation Diagnostics", expanded=bool(diagnostics)):
+question_gating_items = [
+    (get_state_text("q_has_rental_income") == "Yes" and get_state_number("net_rental_income") == 0.0),
+    (get_state_text("q_has_capital_gains") == "Yes" and get_state_number("taxable_capital_gains") == 0.0),
+    (get_state_text("q_has_other_income") == "Yes" and get_state_number("other_income") == 0.0),
+    (get_state_text("q_has_rrsp") == "Yes" and get_state_number("rrsp_deduction") == 0.0),
+    (get_state_text("q_has_fhsa") == "Yes" and get_state_number("fhsa_deduction") == 0.0),
+    (get_state_text("q_has_child_care") == "Yes" and get_state_number("child_care_expenses") == 0.0),
+    (get_state_text("q_has_moving") == "Yes" and get_state_number("moving_expenses") == 0.0),
+    (get_state_text("q_has_work_expenses") == "Yes" and get_state_number("other_employment_expenses") == 0.0),
+    (get_state_text("q_has_student_loan") == "Yes" and get_state_number("student_loan_interest") == 0.0),
+    (get_state_text("q_has_medical") == "Yes" and get_state_number("medical_expenses_paid") == 0.0),
+    (get_state_text("q_has_donations") == "Yes" and get_state_number("charitable_donations") == 0.0),
+    (get_state_text("q_has_spouse") == "Yes" and get_state_number("spouse_net_income") == 0.0),
+    (get_state_text("q_has_dependant") == "Yes" and get_state_number("eligible_dependant_net_income") == 0.0),
+    (get_state_text("q_has_payments") == "Yes" and get_state_number("installments_paid") == 0.0 and get_state_number("other_payments") == 0.0),
+]
+questions_incomplete = any(question_gating_items)
+
+if mvp_step == "questions":
+    st.info("Check any items above that relate to you before continuing.")
+    render_mvp_step_footer(
+        "questions",
+        next_disabled=questions_incomplete,
+        helper_text="If you answered Yes to an item above, add the related amount before continuing.",
+    )
+
+calculate_clicked = False
+if mvp_step == "review_return":
+    render_step_heading("4. Review Return", "4-review-return")
+    slips_used_rows = pd.DataFrame(
+        [
+            {"Slip": "T4 slips", "Count": len(t4_wizard_records), "Key amount": format_currency(float(t4_wizard_totals.get("box14_employment_income", 0.0)))},
+            {"Slip": "T4A slips", "Count": len(t4a_wizard_records), "Key amount": format_currency(float(t4a_wizard_totals.get("box048_fees_other_services", 0.0)))},
+            {"Slip": "T5 slips", "Count": len(t5_wizard_records), "Key amount": format_currency(float(t5_wizard_totals.get("box13_interest", 0.0)))},
+            {"Slip": "T3 slips", "Count": len(t3_wizard_records), "Key amount": format_currency(float(t3_wizard_totals.get("box26_other_income", 0.0)))},
+            {"Slip": "T4PS slips", "Count": len(t4ps_wizard_records), "Key amount": format_currency(float(t4ps_wizard_totals.get("box35_other_employment_income", 0.0)))},
+            {"Slip": "T2202 forms", "Count": len(t2202_wizard_records), "Key amount": format_currency(t2202_tuition_total)},
+        ]
+    )
+    slips_used_rows = slips_used_rows[slips_used_rows["Count"] > 0]
+    with st.container(border=True):
+        st.markdown("#### Slips Used")
+        if slips_used_rows.empty:
+            st.caption("No supported slips are currently loaded in this review.")
+        else:
+            st.dataframe(slips_used_rows, use_container_width=True, hide_index=True)
+
+    with st.container(border=True):
+        st.markdown("#### Extra Amounts Added")
+        st.dataframe(
+            build_currency_df(
+                [
+                    {"Item": "Net rental income", "Amount": net_rental_income},
+                    {"Item": "Taxable capital gains", "Amount": taxable_capital_gains},
+                    {"Item": "Other taxable income", "Amount": other_income},
+                    {"Item": "RRSP deduction", "Amount": rrsp_deduction},
+                    {"Item": "FHSA deduction", "Amount": fhsa_deduction},
+                    {"Item": "Work expenses", "Amount": other_employment_expenses},
+                    {"Item": "Medical expenses paid", "Amount": medical_expenses_paid},
+                    {"Item": "Charitable donations", "Amount": charitable_donations},
+                    {"Item": "Tax instalments paid", "Amount": installments_paid},
+                    {"Item": "Other tax payments / credits", "Amount": other_payments},
+                ],
+                ["Amount"],
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with st.container(border=True):
+        st.markdown("#### Household And Benefits Elections")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"Item": "Spouse or common-law partner at year end", "Status": "Yes" if has_spouse_end_of_year_effective else "No"},
+                    {"Item": "Check spouse amount eligibility", "Status": "Yes" if spouse_claim_enabled_effective else "No"},
+                    {"Item": "Spouse net income entered", "Status": format_currency(spouse_net_income) if has_spouse_end_of_year_effective else "Not entered"},
+                    {"Item": "Check eligible dependant amount", "Status": "Yes" if eligible_dependant_claim_enabled else "No"},
+                    {"Item": "Check Canada Workers Benefit (CWB)", "Status": "Yes" if cwb_basic_eligible_effective else "No"},
+                    {"Item": "Check CWB disability supplement", "Status": "Yes" if cwb_disability_supplement_eligible else "No"},
+                    {"Item": "Check spouse CWB disability supplement", "Status": "Yes" if spouse_cwb_disability_supplement_eligible else "No"},
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    if debug_mode:
+        with st.expander("MVP Debug: spouse and CWB inputs", expanded=True):
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {"Field": "q_has_spouse", "Value": get_state_text("q_has_spouse")},
+                        {"Field": "mvp_has_spouse_end_of_year", "Value": st.session_state.get("mvp_has_spouse_end_of_year", False)},
+                        {"Field": "has_spouse_end_of_year", "Value": has_spouse_end_of_year},
+                        {"Field": "has_spouse_end_of_year_effective", "Value": has_spouse_end_of_year_effective},
+                        {"Field": "spouse_claim_enabled", "Value": spouse_claim_enabled},
+                        {"Field": "mvp_spouse_claim_enabled", "Value": st.session_state.get("mvp_spouse_claim_enabled", False)},
+                        {"Field": "spouse_claim_enabled_effective", "Value": spouse_claim_enabled_effective},
+                        {"Field": "spouse_net_income", "Value": spouse_net_income},
+                        {"Field": "mvp_spouse_net_income", "Value": st.session_state.get("mvp_spouse_net_income", 0.0)},
+                        {"Field": "separated_in_year", "Value": separated_in_year},
+                        {"Field": "support_payments_to_spouse", "Value": support_payments_to_spouse},
+                        {"Field": "q_check_cwb", "Value": get_state_text("q_check_cwb")},
+                        {"Field": "mvp_check_cwb", "Value": st.session_state.get("mvp_check_cwb", False)},
+                        {"Field": "cwb_basic_eligible", "Value": cwb_basic_eligible},
+                        {"Field": "mvp_cwb_basic_eligible", "Value": st.session_state.get("mvp_cwb_basic_eligible", False)},
+                        {"Field": "cwb_basic_eligible_effective", "Value": cwb_basic_eligible_effective},
+                        {"Field": "cwb_disability_supplement_eligible", "Value": cwb_disability_supplement_eligible},
+                        {"Field": "spouse_cwb_disability_supplement_eligible", "Value": spouse_cwb_disability_supplement_eligible},
+                        {"Field": "estimated_adjusted_net_income_for_cwb", "Value": estimated_adjusted_net_income_for_cwb},
+                        {"Field": "estimated_spouse_adjusted_net_income_for_cwb", "Value": estimated_spouse_adjusted_net_income_for_cwb},
+                        {"Field": "auto_canada_workers_benefit_preview", "Value": auto_canada_workers_benefit_preview["credit"]},
+                        {"Field": "auto_cwb_disability_supplement_preview", "Value": auto_cwb_disability_supplement_preview["credit"]},
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
     if diagnostics:
-        render_diagnostics_panel(diagnostics, formatter=format_plain_number)
+        with st.expander("Review Flags", expanded=True):
+            render_diagnostics_panel(diagnostics, formatter=format_plain_number)
     else:
-        st.caption("No obvious duplication or consistency issues were detected from the current inputs.")
+        st.info("No obvious duplication or consistency issues were detected from the current inputs.")
 
-action_col1, action_col2, action_col3 = st.columns([1.2, 0.7, 4.1])
-with action_col1:
-    calculate_clicked = st.button("Calculate Return", type="primary", use_container_width=True)
-with action_col2:
-    reset_clicked = st.button("Reset", use_container_width=True)
-
-if reset_clicked:
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
-    st.rerun()
+    st.info("Review the summary above before clicking Calculate.")
+    action_col1, action_col2 = st.columns([1.2, 4.8])
+    with action_col1:
+        calculate_clicked = st.button("Calculate", type="primary", use_container_width=True)
+    render_mvp_step_footer(
+        "review_return",
+        show_next=False,
+        helper_text="Review the summary above, then click Calculate Return to continue to Results.",
+    )
 
 calculation_inputs = {
             "tax_year": tax_year,
@@ -3249,9 +2951,9 @@ calculation_inputs = {
             "other_loss_carryforward": other_loss_carryforward,
             "spouse_amount_claim": spouse_amount_claim,
             "spouse_net_income": spouse_net_income,
-            "spouse_claim_enabled": spouse_claim_enabled,
+            "spouse_claim_enabled": spouse_claim_enabled_effective,
             "spouse_infirm": spouse_infirm,
-            "has_spouse_end_of_year": has_spouse_end_of_year,
+            "has_spouse_end_of_year": has_spouse_end_of_year_effective,
             "separated_in_year": separated_in_year,
             "support_payments_to_spouse": support_payments_to_spouse,
             "eligible_dependant_claim": eligible_dependant_claim,
@@ -3323,7 +3025,7 @@ calculation_inputs = {
             "installments_paid": installments_paid,
             "other_payments": other_payments,
             "canada_workers_benefit": canada_workers_benefit,
-            "cwb_basic_eligible": cwb_basic_eligible,
+            "cwb_basic_eligible": cwb_basic_eligible_effective,
             "cwb_disability_supplement_eligible": cwb_disability_supplement_eligible,
             "spouse_cwb_disability_supplement_eligible": spouse_cwb_disability_supplement_eligible,
             "canada_training_credit_limit_available": canada_training_credit_limit_available,
@@ -3377,33 +3079,25 @@ if calculate_clicked:
     postcalc_diagnostics = collect_postcalc_diagnostics(result)
     st.session_state["tax_result"] = result
     st.session_state["tax_result_input_signature"] = current_input_signature
+    st.session_state["mvp_step"] = "results"
+    queue_step_scroll("results")
+    st.rerun()
 
-if "tax_result" in st.session_state and st.session_state.get("tax_result_input_signature") == current_input_signature:
+if mvp_step == "results" and "tax_result" not in st.session_state:
+    st.subheader("5. Results")
+    st.info("No current result yet. Use the Review step to calculate the return first.")
+
+if (
+    mvp_step == "results"
+    and "tax_result" in st.session_state
+    and st.session_state.get("tax_result_input_signature") == current_input_signature
+):
     result = st.session_state["tax_result"]
     postcalc_diagnostics = collect_postcalc_diagnostics(result)
 
-    st.subheader("6) Results")
+    render_step_heading("6) Results", "6-results")
     provincial_form_code = PROVINCIAL_FORM_CODES.get(province, "428")
-    tab_names = ["Summary", "Return Details", "Advanced Checks", "Foreign Tax Credit", provincial_form_code, "Rental Details", "Capital Gains", "Tuition", "Donations", "Scope / Limits"]
-    special_tab_name = None
-    if province == "MB":
-        special_tab_name = "MB428-A / MB479"
-    elif province == "NS":
-        special_tab_name = "NS479"
-    elif province == "ON":
-        special_tab_name = "ON479"
-    elif province == "BC":
-        special_tab_name = "BC479 / BC(S12)"
-    elif province == "SK":
-        special_tab_name = "SK479"
-    elif province == "NB":
-        special_tab_name = "NB428 / NB(S12)"
-    elif province == "NL":
-        special_tab_name = "NL428 / NL479"
-    elif province == "PE":
-        special_tab_name = "PE Low-Income / Volunteer"
-    if special_tab_name:
-        tab_names.append(special_tab_name)
+    tab_names, special_tab_name = build_results_tab_names()
     tabs = st.tabs(tab_names)
     client_summary_tab = tabs[0]
     return_tab = tabs[1]
@@ -3419,6 +3113,25 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
 
     with client_summary_tab:
         st.markdown("#### Summary")
+        if debug_mode:
+            with st.expander("MVP Debug: spouse and CWB results", expanded=True):
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {"Field": "line_30300_effective_spouse_claim", "Value": result.get("effective_spouse_claim", 0.0)},
+                            {"Field": "auto_spouse_amount", "Value": result.get("auto_spouse_amount", 0.0)},
+                            {"Field": "household_spouse_allowed", "Value": result.get("household_spouse_allowed", 0.0)},
+                            {"Field": "household_spouse_reason", "Value": result.get("household_spouse_reason", "")},
+                            {"Field": "line_45300_canada_workers_benefit", "Value": result.get("canada_workers_benefit", 0.0)},
+                            {"Field": "cwb_basic_eligible", "Value": result.get("cwb_basic_eligible", 0.0)},
+                            {"Field": "canada_workers_benefit_preview", "Value": result.get("canada_workers_benefit_preview", 0.0)},
+                            {"Field": "canada_workers_benefit_auto", "Value": result.get("canada_workers_benefit_auto", 0.0)},
+                            {"Field": "canada_workers_benefit_manual", "Value": result.get("canada_workers_benefit_manual", 0.0)},
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
         client_drivers_df = build_client_key_drivers_df(
             result,
             province_name,
@@ -3431,106 +3144,24 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             province=province,
             province_name=province_name,
         )
-        summary_wizard_signal_totals = {
-            "t3": float(bool(st.session_state.get("t3_wizard", []))),
-            "t5": float(bool(st.session_state.get("t5_wizard", []))),
-        }
-        summary_raw_input_signals = {
-            "tax_year": tax_year,
-            "province": province,
-            "age": age,
-            "spouse_claim_enabled": st.session_state.get("spouse_claim_enabled", False),
-            "has_spouse_end_of_year": st.session_state.get("has_spouse_end_of_year", False),
-            "separated_in_year": st.session_state.get("separated_in_year", False),
-            "support_payments_to_spouse": st.session_state.get("support_payments_to_spouse", False),
-            "spouse_infirm": st.session_state.get("spouse_infirm", False),
-            "eligible_dependant_claim_enabled": st.session_state.get("eligible_dependant_claim_enabled", False),
-            "dependant_lived_with_you": st.session_state.get("dependant_lived_with_you", False),
-            "dependant_relationship": st.session_state.get("dependant_relationship", ""),
-            "dependant_category": st.session_state.get("dependant_category", ""),
-            "paid_child_support_for_dependant": st.session_state.get("paid_child_support_for_dependant", False),
-            "shared_custody_claim_agreement": st.session_state.get("shared_custody_claim_agreement", False),
-            "another_household_member_claims_dependant": st.session_state.get("another_household_member_claims_dependant", False),
-            "cwb_basic_eligible": st.session_state.get("cwb_basic_eligible", False),
-            "cwb_disability_supplement_eligible": st.session_state.get("cwb_disability_supplement_eligible", False),
-            "spouse_cwb_disability_supplement_eligible": st.session_state.get("spouse_cwb_disability_supplement_eligible", False),
-            "medical_expenses_paid": st.session_state.get("medical_expenses_paid", 0.0),
-            "charitable_donations": st.session_state.get("charitable_donations", 0.0),
-            "donations_eligible_total": st.session_state.get("donations_eligible_total", 0.0),
-            "moving_expenses": st.session_state.get("moving_expenses", 0.0),
-            "child_care_expenses": st.session_state.get("child_care_expenses", 0.0),
-            "other_employment_expenses": st.session_state.get("other_employment_expenses", 0.0),
-            "rrsp_deduction": st.session_state.get("rrsp_deduction", 0.0),
-            "fhsa_deduction": st.session_state.get("fhsa_deduction", 0.0),
-            "support_payments_deduction": st.session_state.get("support_payments_deduction", 0.0),
-            "foreign_income": st.session_state.get("foreign_income", 0.0),
-            "foreign_tax_paid": st.session_state.get("foreign_tax_paid", 0.0),
-            "interest_income": st.session_state.get("interest_income", 0.0),
-            "eligible_dividends": st.session_state.get("eligible_dividends", 0.0),
-            "non_eligible_dividends": st.session_state.get("non_eligible_dividends", 0.0),
-            "student_loan_interest": st.session_state.get("student_loan_interest", 0.0),
-            "tuition_amount_claim": st.session_state.get("tuition_amount_claim", 0.0),
-            "schedule11_current_year_tuition_available": result.get("schedule11_current_year_tuition_available", 0.0),
-            "schedule11_carryforward_available": result.get("schedule11_carryforward_available", 0.0),
-            "canada_training_credit_limit_available": st.session_state.get("canada_training_credit_limit_available", 0.0),
-            "bc_renters_credit_eligible": st.session_state.get("bc_renters_credit_eligible", False),
-            "t776_property_taxes": st.session_state.get("t776_property_taxes", 0.0),
-            "canada_workers_benefit": st.session_state.get("canada_workers_benefit", 0.0),
-            "canada_training_credit": st.session_state.get("canada_training_credit", 0.0),
-            "medical_expense_supplement": st.session_state.get("medical_expense_supplement", 0.0),
-            "other_federal_refundable_credits": st.session_state.get("other_federal_refundable_credits", 0.0),
-            "manual_provincial_refundable_credits": st.session_state.get("manual_provincial_refundable_credits", 0.0),
-            "refundable_credits": st.session_state.get("refundable_credits", 0.0),
-            "spouse_amount_claim": st.session_state.get("spouse_amount_claim", 0.0),
-            "eligible_dependant_claim": st.session_state.get("eligible_dependant_claim", 0.0),
-            "spouse_net_income": st.session_state.get("spouse_net_income", 0.0),
-            "income_tax_withheld": st.session_state.get("income_tax_withheld", 0.0),
-            "cpp_withheld": st.session_state.get("cpp_withheld", 0.0),
-            "ei_withheld": st.session_state.get("ei_withheld", 0.0),
-            "installments_paid": st.session_state.get("installments_paid", 0.0),
-            "other_payments": st.session_state.get("other_payments", 0.0),
-            "t2209_non_business_tax_paid": st.session_state.get("t2209_non_business_tax_paid", 0.0),
-            "t2209_net_foreign_non_business_income": st.session_state.get("t2209_net_foreign_non_business_income", 0.0),
-            "t2209_net_income_override": st.session_state.get("t2209_net_income_override", 0.0),
-            "t2209_basic_federal_tax_override": st.session_state.get("t2209_basic_federal_tax_override", 0.0),
-            "t2036_provincial_tax_otherwise_payable_override": st.session_state.get("t2036_provincial_tax_otherwise_payable_override", 0.0),
-        }
-        summary_screening = build_screening_inputs(
-            province=province,
-            province_name=province_name,
+        summary_suggestions = build_results_summary_suggestions(
             session_state=st.session_state,
-            wizard_totals=summary_wizard_signal_totals,
-            raw_inputs=summary_raw_input_signals,
-        )
-        summary_eligibility_decision = build_eligibility_decision(
-            tax_year=tax_year,
-            province=province,
-            age=float(age or 0.0),
-            raw_inputs=summary_raw_input_signals,
-            result=result,
-        )
-        summary_progress = build_section_progress(
-            session_state=st.session_state,
-            wizard_totals=summary_wizard_signal_totals,
-            raw_inputs=summary_raw_input_signals,
-            result=result,
-            eligibility_decision=summary_eligibility_decision,
-        )
-        summary_guidance_items = build_eligibility_guidance(summary_screening, summary_eligibility_decision, summary_progress)
-        summary_completion_flags = build_completion_flags(
-            screening=summary_screening,
-            progress=summary_progress,
-            wizard_totals=summary_wizard_signal_totals,
-            raw_inputs=summary_raw_input_signals,
             result=result,
             readiness_df=readiness_df,
-            eligibility_decision=summary_eligibility_decision,
+            tax_year=tax_year,
+            province=province,
+            province_name=province_name,
+            age=age,
         )
-        summary_suggestions = build_suggestions(
-            screening=summary_screening,
-            guidance_items=summary_guidance_items,
-            progress=summary_progress,
-            completion_flags=summary_completion_flags,
+        product_recommendation_cards = build_productized_recommendation_cards(
+            result=result,
+            has_spouse=has_spouse_end_of_year_effective,
+            spouse_claim_enabled=spouse_claim_enabled_effective,
+            spouse_net_income=spouse_net_income,
+            cwb_checked=(q_check_cwb_answer == "Yes"),
+            cwb_effective=cwb_basic_eligible_effective,
+            paid_rent_or_property_tax=(get_state_number("t776_property_taxes") > 0.0),
+            has_dependants=(get_state_text("q_has_dependant") == "Yes"),
         )
         quick_review_items, top_warning_items, top_override_items = build_results_quick_notes(
             result=result,
@@ -3546,6 +3177,7 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             province_name=province_name,
             readiness_df=readiness_df,
             suggestions=summary_suggestions,
+            product_cards=product_recommendation_cards,
         )
         with st.expander("Client Review Details", expanded=False):
             st.markdown("#### Plain-Language Numbers")
@@ -3584,17 +3216,17 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
         with st.expander("Printable Shareable Summary", expanded=False):
             st.markdown(printable_html, unsafe_allow_html=True)
             st.download_button(
-                "Download Shareable Summary (PDF)",
+                "Download Ontario Summary (PDF)",
                 data=printable_pdf,
-                file_name=f"{province_name.lower().replace(' ', '-')}-tax-estimate-summary.pdf",
+                file_name="ontario-tax-estimate-summary.pdf",
                 mime="application/pdf",
                 use_container_width=True,
             )
-        st.caption("Simpler summary for sharing. Use the worksheet tabs only if you want line detail.")
+        st.caption("Simpler summary for sharing. This PDF is an estimate summary, not a filed return or CRA-certified filing package.")
         st.caption("If you want a second review of slips, support, or filing readiness, reach out: info@contexta.biz")
 
     with return_tab:
-        st.caption("Worksheet view. Start with the overview and open the line details only if needed.")
+        st.caption("Ontario worksheet view for estimate review. Open the line details only if you want a deeper manual check.")
 
         overview_col1, overview_col2 = st.columns(2)
         with overview_col1:
@@ -3640,7 +3272,7 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             st.dataframe(federal_build_up_df, use_container_width=True, hide_index=True)
 
     with reconciliation_tab:
-        st.markdown("#### Input Checks")
+        st.markdown("#### Advanced Review Checks")
         st.caption("Most users can skip this tab. Open it only for a deeper audit trail.")
         if top_warning_items or top_override_items:
             with st.container(border=True):
@@ -3703,15 +3335,16 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
                 missing_support_df=missing_support_df,
             )
             st.download_button(
-                "Download Report Pack (PDF)",
+                "Download Ontario Report Pack (PDF)",
                 data=report_pack_pdf,
-                file_name=f"{province_name.lower().replace(' ', '-')}-tax-estimate-report-pack.pdf",
+                file_name="ontario-tax-estimate-report-pack.pdf",
                 mime="application/pdf",
                 use_container_width=True,
             )
+            st.caption("This report pack is for review support only. It is not a CRA-certified filing package and may still require manual checks.")
 
     with t2209_tab:
-        st.markdown("#### Foreign Tax Credit Worksheet")
+        st.markdown("#### Ontario Foreign Tax Credit Worksheet")
         st.caption("Most users only need this if they are checking foreign tax credits in detail.")
         t2209_rows = build_currency_df(
             [
@@ -3738,7 +3371,7 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             st.dataframe(t2209_rows, use_container_width=True, hide_index=True)
 
     with provincial_tab:
-        st.markdown(f"#### {province_name} Worksheet View")
+        st.markdown("#### Ontario Worksheet View")
         if province == "ON":
             with st.expander("ON428 Part C Lines 74-90", expanded=False):
                 on428_part_c_df = build_on428_part_c_df(result)
@@ -3754,21 +3387,21 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             st.dataframe(provincial_rows, use_container_width=True, hide_index=True)
 
     with t776_tab:
-        st.markdown("#### T776 Worksheet View")
+        st.markdown("#### Ontario Rental Worksheet (T776)")
         t776_rows = build_t776_df(result)
         t776_rows["Amount"] = t776_rows["Amount"].map(format_currency)
         with st.expander("Detailed T776 Lines", expanded=False):
             st.dataframe(t776_rows, use_container_width=True, hide_index=True)
 
     with s3_tab:
-        st.markdown("#### Schedule 3 Worksheet View")
+        st.markdown("#### Ontario Capital Gains Worksheet (Schedule 3)")
         s3_rows = build_schedule_3_df(result)
         s3_rows["Amount"] = s3_rows["Amount"].map(format_currency)
         with st.expander("Detailed Schedule 3 Lines", expanded=False):
             st.dataframe(s3_rows, use_container_width=True, hide_index=True)
 
     with s11_tab:
-        st.markdown("#### Schedule 11 Worksheet View")
+        st.markdown("#### Ontario Tuition Worksheet (Schedule 11)")
         st.caption("Training credit is applied first, then carryforward, then line 32300.")
         s11_rows = build_schedule_11_df(result)
         s11_rows["Amount"] = s11_rows["Amount"].map(format_currency)
@@ -3776,7 +3409,7 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             st.dataframe(s11_rows, use_container_width=True, hide_index=True)
 
     with s9_tab:
-        st.markdown("#### Schedule 9 Worksheet View")
+        st.markdown("#### Ontario Donations Worksheet (Schedule 9)")
         s9_rows = build_currency_df(
             [
                 {"Line": "1A", "Description": "Current-year regular donations available", "Amount": result.get("schedule9_current_year_donations_available", 0.0)},
@@ -3802,13 +3435,16 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             st.dataframe(s9_rows, use_container_width=True, hide_index=True)
 
     with scope_tab:
-        st.markdown("#### Supported Scope")
-        st.markdown(read_public_markdown_doc("PUBLIC_SUPPORTED_SCOPE.md"))
-        st.markdown("#### Best-Fit And Manual Review Scenarios")
-        st.markdown(read_public_markdown_doc("PUBLIC_BEST_FIT_AND_REVIEW_SCENARIOS.md"))
-        st.markdown("#### Limitations and Boundaries")
-        st.markdown(read_public_markdown_doc("PUBLIC_LIMITATIONS.md"))
-        st.caption("Reference notes on supported scope and limitations.")
+        st.warning(
+            "This tool provides an Ontario-focused estimate and review workflow. It is not CRA-certified filing software, and some benefits or complex cases still require separate review."
+        )
+        with st.expander("Supported Scope", expanded=False):
+            st.markdown(read_public_markdown_doc("PUBLIC_SUPPORTED_SCOPE.md"))
+        with st.expander("Best-Fit And Review Scenarios", expanded=False):
+            st.markdown(read_public_markdown_doc("PUBLIC_BEST_FIT_AND_REVIEW_SCENARIOS.md"))
+        with st.expander("Limitations And Boundaries", expanded=False):
+            st.markdown(read_public_markdown_doc("PUBLIC_LIMITATIONS.md"))
+        st.caption("Before filing, manually review any unsupported slips, low-confidence extractions, carryforwards, separately reviewed benefits, and unusual household situations.")
 
     if special_tab is not None:
         with special_tab:
@@ -3819,6 +3455,12 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             else:
                 special_rows["Amount"] = special_rows["Amount"].map(format_currency)
                 st.dataframe(special_rows, use_container_width=True, hide_index=True)
+    render_mvp_step_footer(
+        "results",
+        show_next=False,
+        show_reset=True,
+        helper_text="Use Back to return to earlier steps and make adjustments.",
+    )
 
     render_advanced_technical_details(
         result=result,
@@ -3831,7 +3473,14 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
     )
 
 st.markdown("---")
+render_pending_step_scroll()
 st.caption(
-    "This estimator is much broader than the original employment-only calculator, but it is still not a substitute "
-    "for CRA-certified filing software. Review slip amounts, carryforwards, and province-specific credits carefully."
+    "This tool helps extract data from uploaded slips and estimate an Ontario personal T1 result, but it does not replace CRA-certified filing software. "
+    "Always manually review imported amounts, unsupported slips, carryforwards, separately reviewed benefits, and unusual household or credit situations before filing."
+)
+debug_mode = st.toggle(
+    "Developer mode",
+    value=debug_mode,
+    key="debug_mode",
+    help="Show internal debug panels for MVP flow troubleshooting.",
 )

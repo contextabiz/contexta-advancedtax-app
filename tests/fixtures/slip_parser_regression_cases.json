@@ -1,0 +1,54 @@
+[
+  {
+    "name": "T4 Slip #1",
+    "path": "C:/Users/BertWu/Desktop/TaxSlip/2025/Test/T4 Slip #1.pdf",
+    "expected_type": "T4",
+    "expected_fields": {
+      "box16_cpp": 136.18,
+      "box22_tax_withheld": 235.68,
+      "box26_cpp_pensionable_earnings": 2703.89,
+      "box20_rpp": 0.0
+    }
+  },
+  {
+    "name": "T4 Slip #2",
+    "path": "C:/Users/BertWu/Desktop/TaxSlip/2025/Test/T4 Slip #2.pdf",
+    "expected_type": "T4",
+    "expected_fields": {
+      "box16_cpp": 2429.47,
+      "box20_rpp": 1838.53,
+      "box24_ei_insurable_earnings": 43366.23
+    }
+  },
+  {
+    "name": "T3 Slip #1",
+    "path": "C:/Users/BertWu/Desktop/TaxSlip/2025/Test/T3 Slip #1.pdf",
+    "expected_type": "T3",
+    "expected_fields": {
+      "box26_other_income": 0.0,
+      "box34_foreign_tax_paid": 1.62,
+      "box50_eligible_dividends_taxable": 0.0
+    }
+  },
+  {
+    "name": "T4PS Slip #1",
+    "path": "C:/Users/BertWu/Desktop/TaxSlip/2025/Test/T4PS Slip #1.pdf",
+    "expected_type": "T4PS",
+    "expected_fields": {
+      "box30_eligible_dividends_actual": 2.86,
+      "box31_eligible_dividends_taxable": 3.95,
+      "box32_eligible_dividend_credit": 0.59,
+      "box35_other_employment_income": 621.36
+    }
+  },
+  {
+    "name": "T2202 Form #1",
+    "path": "C:/Users/BertWu/Desktop/TaxSlip/2025/Test/T2202 Form #1.pdf",
+    "expected_type": "T2202",
+    "expected_fields": {
+      "box24_total_months_part_time": 11.0,
+      "box25_total_months_full_time": 0.0,
+      "box26_total_eligible_tuition": 7635.98
+    }
+  }
+]
