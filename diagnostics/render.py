@@ -7,6 +7,7 @@ def render_diagnostics_panel(
     checks: list[DiagnosticItem],
     *,
     formatter=None,
+    show_counts: bool = True,
 ) -> None:
     severity_styles = {
         "High": {"bg": "#7f1d1d", "fg": "#fecaca"},
@@ -23,15 +24,16 @@ def render_diagnostics_panel(
         def formatter(value: float) -> str:
             return str(value)
 
-    metric_values = [
-        ("High-Risk", float(severity_counts["High"])),
-        ("Warnings", float(severity_counts["Warning"])),
-        ("Info", float(severity_counts["Info"])),
-    ]
-    columns = st.columns(3)
-    for column, (label, value) in zip(columns, metric_values):
-        display_value = formatter(value)
-        column.metric(label, display_value)
+    if show_counts:
+        metric_values = [
+            ("High-Risk", float(severity_counts["High"])),
+            ("Warnings", float(severity_counts["Warning"])),
+            ("Info", float(severity_counts["Info"])),
+        ]
+        columns = st.columns(3)
+        for column, (label, value) in zip(columns, metric_values):
+            display_value = formatter(value)
+            column.metric(label, display_value)
 
     for severity, category, message in checks:
         style = severity_styles.get(severity, {"bg": "#374151", "fg": "#f3f4f6"})

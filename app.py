@@ -68,8 +68,9 @@ from tax_engine.credits import (
     calculate_medical_claim,
     calculate_medical_expense_supplement,
     calculate_payroll_overpayment_refunds,
+    calculate_spouse_amount,
 )
-from tax_engine.utils import estimate_employee_cpp_ei
+from tax_engine.utils import calculate_federal_bpa, estimate_employee_cpp_ei
 
 META_TITLE = "Canadian Personal Tax Estimator | Advanced Federal & Provincial Tax Calculator"
 META_DESCRIPTION = (
@@ -109,7 +110,7 @@ FLOW_STEPS = [
     (4, "Deductions"),
     (5, "Credits, Carryforwards, and Special Cases"),
     (6, "Payments and Withholdings"),
-    (7, "Pre-Calculation Diagnostics"),
+    (7, "Summary & Pre-Calculation Diagnostics"),
 ]
 PROVINCIAL_CAREGIVER_HELP = {
     "AB": "AB428 caregiver amount base. Alberta's 2025 maximum is $12,922 per dependant before applying the 6% credit rate.",
@@ -1453,6 +1454,17 @@ def read_slip_wizard_records_from_state(configs: list[dict[str, object]]) -> dic
     for config in configs:
         card_key = str(config["key"])
         fields = list(config["fields"])
+        stored_records = st.session_state.get(card_key)
+        if isinstance(stored_records, list):
+            normalized_records: list[dict[str, float]] = []
+            for stored_record in stored_records:
+                normalized_record: dict[str, float] = {}
+                for field in fields:
+                    field_id = str(field["id"])
+                    normalized_record[field_id] = float((stored_record or {}).get(field_id, 0.0))
+                normalized_records.append(normalized_record)
+            records_by_key[card_key] = normalized_records
+            continue
         count = int(st.session_state.get(f"{card_key}_count", 1))
         records: list[dict[str, float]] = []
         for index in range(count):
@@ -1470,6 +1482,20 @@ def read_record_card_editor_state(
     fields: list[dict[str, object]],
     count_default: int = 1,
 ) -> pd.DataFrame:
+    stored_records = st.session_state.get(card_key)
+    if isinstance(stored_records, list):
+        normalized_records: list[dict[str, object]] = []
+        for stored_record in stored_records:
+            normalized_record: dict[str, object] = {}
+            for field in fields:
+                field_id = str(field["id"])
+                field_type = str(field.get("type", "number"))
+                if field_type in {"text", "select"}:
+                    normalized_record[field_id] = (stored_record or {}).get(field_id, field.get("value", ""))
+                else:
+                    normalized_record[field_id] = float((stored_record or {}).get(field_id, field.get("value", 0.0)))
+            normalized_records.append(normalized_record)
+        return pd.DataFrame(normalized_records)
     count = int(st.session_state.get(f"{card_key}_count", count_default))
     records: list[dict[str, object]] = []
     for index in range(count):
@@ -1762,18 +1788,18 @@ other_deductions = float(st.session_state.get("other_deductions", 0.0))
 net_capital_loss_carryforward = float(st.session_state.get("net_capital_loss_carryforward", 0.0))
 other_loss_carryforward = float(st.session_state.get("other_loss_carryforward", 0.0))
 
-spouse_claim_enabled = bool(st.session_state.get("spouse_claim_enabled", False))
-has_spouse_end_of_year = bool(st.session_state.get("has_spouse_end_of_year", False))
-separated_in_year = bool(st.session_state.get("separated_in_year", False))
-support_payments_to_spouse = bool(st.session_state.get("support_payments_to_spouse", False))
-spouse_infirm = bool(st.session_state.get("spouse_infirm", False))
-spouse_disability_transfer_available = bool(st.session_state.get("spouse_disability_transfer_available", False))
-spouse_disability_transfer_available_amount = float(st.session_state.get("spouse_disability_transfer_available_amount", 0.0))
-spouse_net_income = float(st.session_state.get("spouse_net_income", 0.0))
-eligible_dependant_claim_enabled = bool(st.session_state.get("eligible_dependant_claim_enabled", False))
+spouse_claim_enabled = bool(st.session_state.get("spouse_claim_enabled", st.session_state.get("persist_spouse_claim_enabled", False)))
+has_spouse_end_of_year = bool(st.session_state.get("has_spouse_end_of_year", st.session_state.get("persist_has_spouse_end_of_year", False)))
+separated_in_year = bool(st.session_state.get("separated_in_year", st.session_state.get("persist_separated_in_year", False)))
+support_payments_to_spouse = bool(st.session_state.get("support_payments_to_spouse", st.session_state.get("persist_support_payments_to_spouse", False)))
+spouse_infirm = bool(st.session_state.get("spouse_infirm", st.session_state.get("persist_spouse_infirm", False)))
+spouse_disability_transfer_available = bool(st.session_state.get("spouse_disability_transfer_available", st.session_state.get("persist_spouse_disability_transfer_available", False)))
+spouse_disability_transfer_available_amount = float(st.session_state.get("spouse_disability_transfer_available_amount", st.session_state.get("persist_spouse_disability_transfer_available_amount", 0.0)))
+spouse_net_income = float(st.session_state.get("spouse_net_income", st.session_state.get("persist_spouse_net_income", 0.0)))
+eligible_dependant_claim_enabled = bool(st.session_state.get("eligible_dependant_claim_enabled", st.session_state.get("persist_eligible_dependant_claim_enabled", False)))
 eligible_dependant_infirm = bool(st.session_state.get("eligible_dependant_infirm", False))
 dependant_lived_with_you = bool(st.session_state.get("dependant_lived_with_you", False))
-eligible_dependant_net_income = float(st.session_state.get("eligible_dependant_net_income", 0.0))
+eligible_dependant_net_income = float(st.session_state.get("eligible_dependant_net_income", st.session_state.get("persist_eligible_dependant_net_income", 0.0)))
 dependant_relationship = str(st.session_state.get("dependant_relationship", "Child"))
 dependant_category = str(st.session_state.get("dependant_category", "Minor child"))
 dependant_disability_transfer_available = bool(st.session_state.get("dependant_disability_transfer_available", False))
@@ -1786,8 +1812,8 @@ another_household_member_claims_disability_transfer = bool(st.session_state.get(
 medical_dependant_claim_shared = bool(st.session_state.get("medical_dependant_claim_shared", False))
 caregiver_claim_target = str(st.session_state.get("caregiver_claim_target", "Auto"))
 disability_transfer_source = str(st.session_state.get("disability_transfer_source", "Auto"))
-spouse_amount_claim = float(st.session_state.get("spouse_amount_claim", 0.0))
-eligible_dependant_claim = float(st.session_state.get("eligible_dependant_claim", 0.0))
+spouse_amount_claim = float(st.session_state.get("spouse_amount_claim", st.session_state.get("persist_spouse_amount_claim", 0.0)))
+eligible_dependant_claim = float(st.session_state.get("eligible_dependant_claim", st.session_state.get("persist_eligible_dependant_claim", 0.0)))
 age_amount_claim = float(st.session_state.get("age_amount_claim", 0.0))
 disability_amount_claim = float(st.session_state.get("disability_amount_claim", 0.0))
 tuition_amount_claim = float(st.session_state.get("tuition_amount_claim", 0.0))
@@ -1816,10 +1842,10 @@ t2209_net_foreign_non_business_income = float(st.session_state.get("t2209_net_fo
 t2209_net_income_override = float(st.session_state.get("t2209_net_income_override", 0.0))
 t2209_basic_federal_tax_override = float(st.session_state.get("t2209_basic_federal_tax_override", 0.0))
 t2036_provincial_tax_otherwise_payable_override = float(st.session_state.get("t2036_provincial_tax_otherwise_payable_override", 0.0))
-cwb_basic_eligible = bool(st.session_state.get("cwb_basic_eligible", False))
-cwb_disability_supplement_eligible = bool(st.session_state.get("cwb_disability_supplement_eligible", False))
-spouse_cwb_disability_supplement_eligible = bool(st.session_state.get("spouse_cwb_disability_supplement_eligible", False))
-canada_workers_benefit = float(st.session_state.get("canada_workers_benefit", 0.0))
+cwb_basic_eligible = bool(st.session_state.get("cwb_basic_eligible", st.session_state.get("persist_cwb_basic_eligible", False)))
+cwb_disability_supplement_eligible = bool(st.session_state.get("cwb_disability_supplement_eligible", st.session_state.get("persist_cwb_disability_supplement_eligible", False)))
+spouse_cwb_disability_supplement_eligible = bool(st.session_state.get("spouse_cwb_disability_supplement_eligible", st.session_state.get("persist_spouse_cwb_disability_supplement_eligible", False)))
+canada_workers_benefit = float(st.session_state.get("canada_workers_benefit", st.session_state.get("persist_canada_workers_benefit", 0.0)))
 canada_training_credit_limit_available = float(st.session_state.get("canada_training_credit_limit_available", 0.0))
 canada_training_credit = float(st.session_state.get("canada_training_credit", 0.0))
 medical_expense_supplement = float(st.session_state.get("medical_expense_supplement", 0.0))
@@ -2091,7 +2117,7 @@ ei_withheld_total = ei_withheld + float(t4_wizard_totals.get("box18_ei", 0.0))
 
 if current_step == 3:
     st.markdown("### 3) Income and Investment")
-    st.caption("Most users can skip this section if all of their income is already covered by slips in 1A. Use it only for extra income, manual additions, or when you want a clearer worksheet trail.")
+    st.caption("Most users can skip this section if all of their income is already covered by slips. Use it only for extra income, manual additions, or when you want a clearer worksheet trail.")
     st.markdown("#### Income")
     income_col1, income_col2, income_col3 = st.columns(3)
     employment_income_manual = number_input("Manual Employment Income", "employment_income", 1000.0)
@@ -2771,6 +2797,22 @@ if current_step == 5:
         + manual_provincial_refundable_credits
         + refundable_credits
     )
+    st.session_state["persist_spouse_claim_enabled"] = spouse_claim_enabled
+    st.session_state["persist_has_spouse_end_of_year"] = has_spouse_end_of_year
+    st.session_state["persist_separated_in_year"] = separated_in_year
+    st.session_state["persist_support_payments_to_spouse"] = support_payments_to_spouse
+    st.session_state["persist_spouse_infirm"] = spouse_infirm
+    st.session_state["persist_spouse_disability_transfer_available"] = spouse_disability_transfer_available
+    st.session_state["persist_spouse_disability_transfer_available_amount"] = spouse_disability_transfer_available_amount
+    st.session_state["persist_spouse_net_income"] = spouse_net_income
+    st.session_state["persist_spouse_amount_claim"] = spouse_amount_claim
+    st.session_state["persist_eligible_dependant_claim_enabled"] = eligible_dependant_claim_enabled
+    st.session_state["persist_eligible_dependant_net_income"] = eligible_dependant_net_income
+    st.session_state["persist_eligible_dependant_claim"] = eligible_dependant_claim
+    st.session_state["persist_cwb_basic_eligible"] = cwb_basic_eligible
+    st.session_state["persist_cwb_disability_supplement_eligible"] = cwb_disability_supplement_eligible
+    st.session_state["persist_spouse_cwb_disability_supplement_eligible"] = spouse_cwb_disability_supplement_eligible
+    st.session_state["persist_canada_workers_benefit"] = canada_workers_benefit
     with st.expander("Province-Specific Credits And Schedules", expanded=False):
         st.caption("Open this only if you are adding province-specific claim amounts or special schedule inputs.")
         on_col1, on_col2, on_col3 = st.columns(3)
@@ -3396,34 +3438,121 @@ diagnostics = collect_diagnostics(
     }
 )
 
+wizard_spouse_claim_enabled = bool(st.session_state.get("spouse_claim_enabled", spouse_claim_enabled))
+wizard_has_spouse_end_of_year = bool(st.session_state.get("has_spouse_end_of_year", has_spouse_end_of_year))
+wizard_separated_in_year = bool(st.session_state.get("separated_in_year", separated_in_year))
+wizard_support_payments_to_spouse = bool(st.session_state.get("support_payments_to_spouse", support_payments_to_spouse))
+wizard_spouse_infirm = bool(st.session_state.get("spouse_infirm", spouse_infirm))
+wizard_spouse_net_income = float(st.session_state.get("spouse_net_income", spouse_net_income))
+wizard_spouse_amount_claim = float(st.session_state.get("spouse_amount_claim", spouse_amount_claim))
+wizard_eligible_dependant_claim_enabled = bool(st.session_state.get("eligible_dependant_claim_enabled", eligible_dependant_claim_enabled))
+wizard_eligible_dependant_net_income = float(st.session_state.get("eligible_dependant_net_income", eligible_dependant_net_income))
+wizard_eligible_dependant_claim = float(st.session_state.get("eligible_dependant_claim", eligible_dependant_claim))
+wizard_cwb_basic_eligible = bool(st.session_state.get("cwb_basic_eligible", cwb_basic_eligible))
+wizard_cwb_disability_supplement_eligible = bool(st.session_state.get("cwb_disability_supplement_eligible", cwb_disability_supplement_eligible))
+wizard_spouse_cwb_disability_supplement_eligible = bool(
+    st.session_state.get("spouse_cwb_disability_supplement_eligible", spouse_cwb_disability_supplement_eligible)
+)
+wizard_canada_workers_benefit = float(st.session_state.get("canada_workers_benefit", canada_workers_benefit))
+wizard_spouse_amount_preview = 0.0
+if (
+    wizard_spouse_claim_enabled
+    and wizard_has_spouse_end_of_year
+    and not wizard_separated_in_year
+    and not wizard_support_payments_to_spouse
+):
+    wizard_spouse_amount_preview = calculate_spouse_amount(
+        calculate_federal_bpa(estimated_net_income, t4_params),
+        wizard_spouse_net_income,
+        wizard_spouse_infirm,
+    )
+wizard_cwb_preview_credit = 0.0
+if wizard_cwb_basic_eligible:
+    wizard_cwb_preview = calculate_canada_workers_benefit(
+        tax_year=tax_year,
+        working_income=employment_income,
+        adjusted_net_income=estimated_adjusted_net_income_for_cwb,
+        spouse_adjusted_net_income=estimated_spouse_adjusted_net_income_for_cwb,
+        has_spouse=wizard_has_spouse_end_of_year,
+        has_eligible_dependant=(
+            (wizard_eligible_dependant_claim_enabled or additional_dependant_count > 0)
+            and not wizard_has_spouse_end_of_year
+        ),
+    )
+    wizard_cwb_disability_preview = calculate_cwb_disability_supplement(
+        tax_year=tax_year,
+        adjusted_net_income=estimated_adjusted_net_income_for_cwb,
+        spouse_adjusted_net_income=estimated_spouse_adjusted_net_income_for_cwb,
+        has_spouse=wizard_has_spouse_end_of_year,
+        is_disabled=wizard_cwb_disability_supplement_eligible,
+        spouse_is_disabled=wizard_spouse_cwb_disability_supplement_eligible,
+    )
+    wizard_cwb_preview_credit = wizard_cwb_preview["credit"] + wizard_cwb_disability_preview["credit"]
+
 if current_step == 7:
-    st.markdown("### 7) Pre-Calculation Diagnostics")
+    st.markdown("### 7) Summary & Pre-Calculation Diagnostics")
     st.caption("This is the final pre-calculation gate. Review any flagged items, then calculate when the file looks ready.")
     high_risk_count = sum(1 for severity, _, _ in diagnostics if severity == "High-Risk")
     warning_count = sum(1 for severity, _, _ in diagnostics if severity == "Warning")
     info_count = sum(1 for severity, _, _ in diagnostics if severity == "Info")
     with st.container(border=True):
         st.markdown("##### Before You Calculate")
-        render_metric_row(
-            [
-                ("High-Risk", float(high_risk_count)),
-                ("Warnings", float(warning_count)),
-                ("Info", float(info_count)),
-            ],
-            3,
-            formatter=format_plain_number,
-        )
-        if high_risk_count > 0:
-            st.warning("High-risk items are still showing. It is worth checking those before you calculate.")
-        elif warning_count > 0:
-            st.info("Only review-level items are showing. You can still calculate now, then come back if needed.")
+        current_input_summary = [
+            ("Employment Income", employment_income),
+            ("Investment / Other Income", other_income + interest_income + taxable_capital_gains + t5_eligible_dividends_taxable + t5_non_eligible_dividends_taxable + t3_eligible_dividends_taxable + t3_non_eligible_dividends_taxable),
+            ("Deductions Entered", estimated_total_deductions),
+            ("Tax Withheld", income_tax_withheld_total),
+        ]
+        render_metric_row(current_input_summary, 4)
+        household_refundable_flags: list[str] = []
+        if wizard_spouse_claim_enabled and wizard_has_spouse_end_of_year:
+            household_refundable_flags.append(
+                f"Spouse amount active (preview: {format_currency(wizard_spouse_amount_preview)}, spouse net income: {format_currency(wizard_spouse_net_income)})"
+            )
+        elif wizard_spouse_claim_enabled:
+            if not wizard_has_spouse_end_of_year:
+                household_refundable_flags.append("Spouse amount not yet active: also confirm spouse/common-law status at year end")
+            elif wizard_separated_in_year:
+                household_refundable_flags.append("Spouse amount blocked: separated during the year is turned on")
+            elif wizard_support_payments_to_spouse:
+                household_refundable_flags.append("Spouse amount blocked: support payments to spouse / partner are turned on")
+        if wizard_cwb_basic_eligible:
+            household_refundable_flags.append(f"CWB active (preview: {format_currency(wizard_cwb_preview_credit)})")
+        if household_refundable_flags:
+            st.caption("Household / refundable summary: " + " | ".join(household_refundable_flags))
+        if diagnostics:
+            st.divider()
+            st.markdown("##### Diagnostic Details")
+            if high_risk_count > 0:
+                st.warning("High-risk items are still showing. It is worth checking those before you calculate.")
+            elif warning_count > 0:
+                st.info("Only review-level items are showing. You can still calculate now, then come back if needed.")
+            else:
+                st.success("No major pre-calculation issues are standing out. You can calculate the return when ready.")
+            render_metric_row(
+                [
+                    ("High-Risk", float(high_risk_count)),
+                    ("Warnings", float(warning_count)),
+                    ("Info", float(info_count)),
+                ],
+                3,
+                formatter=format_plain_number,
+            )
+            render_diagnostics_panel(diagnostics, formatter=format_plain_number, show_counts=False)
         else:
+            st.divider()
+            st.markdown("##### Diagnostic Details")
             st.success("No major pre-calculation issues are standing out. You can calculate the return when ready.")
-    if diagnostics:
-        with st.expander("Pre-Calculation Diagnostics", expanded=True):
-            render_diagnostics_panel(diagnostics, formatter=format_plain_number)
-    else:
-        st.caption("No obvious duplication or consistency issues were detected from the current inputs.")
+            render_metric_row(
+                [
+                    ("High-Risk", float(high_risk_count)),
+                    ("Warnings", float(warning_count)),
+                    ("Info", float(info_count)),
+                ],
+                3,
+                formatter=format_plain_number,
+            )
+            st.caption("No obvious duplication or consistency issues were detected from the current inputs.")
 
     action_col1, action_col2, action_col3 = st.columns([1.2, 0.7, 4.1])
     with action_col1:
@@ -3498,16 +3627,16 @@ calculation_inputs = {
             "other_deductions": other_deductions,
             "net_capital_loss_carryforward": net_capital_loss_carryforward,
             "other_loss_carryforward": other_loss_carryforward,
-            "spouse_amount_claim": spouse_amount_claim,
-            "spouse_net_income": spouse_net_income,
-            "spouse_claim_enabled": spouse_claim_enabled,
-            "spouse_infirm": spouse_infirm,
-            "has_spouse_end_of_year": has_spouse_end_of_year,
-            "separated_in_year": separated_in_year,
-            "support_payments_to_spouse": support_payments_to_spouse,
-            "eligible_dependant_claim": eligible_dependant_claim,
-            "eligible_dependant_net_income": eligible_dependant_net_income,
-            "eligible_dependant_claim_enabled": eligible_dependant_claim_enabled,
+            "spouse_amount_claim": wizard_spouse_amount_claim,
+            "spouse_net_income": wizard_spouse_net_income,
+            "spouse_claim_enabled": wizard_spouse_claim_enabled,
+            "spouse_infirm": wizard_spouse_infirm,
+            "has_spouse_end_of_year": wizard_has_spouse_end_of_year,
+            "separated_in_year": wizard_separated_in_year,
+            "support_payments_to_spouse": wizard_support_payments_to_spouse,
+            "eligible_dependant_claim": wizard_eligible_dependant_claim,
+            "eligible_dependant_net_income": wizard_eligible_dependant_net_income,
+            "eligible_dependant_claim_enabled": wizard_eligible_dependant_claim_enabled,
             "eligible_dependant_infirm": eligible_dependant_infirm,
             "dependant_relationship": dependant_relationship,
             "dependant_category": dependant_category,
@@ -3573,10 +3702,10 @@ calculation_inputs = {
             "ei_withheld_total": ei_withheld_total,
             "installments_paid": installments_paid,
             "other_payments": other_payments,
-            "canada_workers_benefit": canada_workers_benefit,
-            "cwb_basic_eligible": cwb_basic_eligible,
-            "cwb_disability_supplement_eligible": cwb_disability_supplement_eligible,
-            "spouse_cwb_disability_supplement_eligible": spouse_cwb_disability_supplement_eligible,
+            "canada_workers_benefit": wizard_canada_workers_benefit,
+            "cwb_basic_eligible": wizard_cwb_basic_eligible,
+            "cwb_disability_supplement_eligible": wizard_cwb_disability_supplement_eligible,
+            "spouse_cwb_disability_supplement_eligible": wizard_spouse_cwb_disability_supplement_eligible,
             "canada_training_credit_limit_available": canada_training_credit_limit_available,
             "canada_training_credit": canada_training_credit,
             "medical_expense_supplement": medical_expense_supplement,
@@ -3632,6 +3761,8 @@ if calculate_clicked:
 if "tax_result" in st.session_state and st.session_state.get("tax_result_input_signature") == current_input_signature:
     result = st.session_state["tax_result"]
     postcalc_diagnostics = collect_postcalc_diagnostics(result)
+    if current_step == 7:
+        st.success("Calculation complete. Results are shown below.")
 
     st.subheader("Results")
     provincial_form_code = PROVINCIAL_FORM_CODES.get(province, "428")

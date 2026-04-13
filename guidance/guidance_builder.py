@@ -46,7 +46,7 @@ def build_eligibility_guidance(
             "priority": "likely",
             "what": "Check the spouse / common-law partner amount.",
             "why": "This can reduce tax if your spouse or partner had low net income.",
-            "where": "Section 4 -> Household And Dependants",
+            "where": "Step 5 -> Household And Dependants",
             "estimated_here": True,
             "confidence": "medium",
         })
@@ -66,7 +66,7 @@ def build_eligibility_guidance(
             "priority": "likely",
             "what": "Review eligible dependant, caregiver, disability transfer, and dependant medical rules.",
             "why": "Household-related claims are easy to miss and can affect both federal and provincial credits.",
-            "where": "Section 4 -> Household And Dependants",
+            "where": "Step 5 -> Household And Dependants",
             "estimated_here": True,
             "confidence": "medium",
         })
@@ -79,7 +79,7 @@ def build_eligibility_guidance(
             "priority": "likely",
             "what": "Check tuition, student loan interest, and any tuition carryforward amounts.",
             "why": "These amounts often create credits now or preserve carryforwards for later years.",
-            "where": "Section 4 -> Common Credits And Claim Amounts or Section 4 -> Carryforwards And Transfers",
+            "where": "Step 5 -> Common Credits And Claim Amounts or Step 5 -> Carryforwards And Transfers",
             "estimated_here": True,
             "confidence": "high",
         })
@@ -95,7 +95,7 @@ def build_eligibility_guidance(
             "priority": "likely",
             "what": "Check medical expenses and charitable donations.",
             "why": "Even moderate amounts can create useful non-refundable credits.",
-            "where": "Section 4 -> Common Credits And Claim Amounts",
+            "where": "Step 5 -> Common Credits And Claim Amounts",
             "estimated_here": True,
             "confidence": "high",
         })
@@ -107,7 +107,7 @@ def build_eligibility_guidance(
             "priority": "likely",
             "what": "Review RRSP, FHSA, moving expenses, child care, support payments, and work-related deductions.",
             "why": "Deductions reduce income directly, which can also change other credits and benefits.",
-            "where": "Section 3 -> Deductions",
+            "where": "Step 4 -> Deductions",
             "estimated_here": True,
             "confidence": "high",
         })
@@ -123,7 +123,7 @@ def build_eligibility_guidance(
             "priority": "likely",
             "what": "Review foreign income, dividends, investment income, and foreign tax inputs.",
             "why": "Foreign income, dividends, and investment amounts are easy to misclassify or count twice.",
-            "where": "Section 2 -> Income And Investment and Section 4 -> Foreign Tax And Dividend Credits",
+            "where": "Step 3 -> Income And Investment and Step 5 -> Foreign Tax And Dividend Credits",
             "estimated_here": True,
             "confidence": "medium",
         })
@@ -136,7 +136,7 @@ def build_eligibility_guidance(
                 "priority": "maybe",
                 "what": "Check whether Canada Workers Benefit or Medical Expense Supplement may apply.",
                 "why": "Lower-income returns often qualify for refundable support that changes the final result.",
-                "where": "Section 4 -> Refundable Credit Manual Amounts (Advanced) and Section 6 -> Summary",
+                "where": "Step 5 -> Refundable Credit Manual Amounts (Advanced) and Results -> Summary",
                 "estimated_here": True,
                 "confidence": "medium",
             })
@@ -165,7 +165,7 @@ def build_eligibility_guidance(
             "priority": "maybe",
             "what": "Check whether your housing costs affect province-specific benefits.",
             "why": "Some provinces tie credits or benefits to housing costs, family status, or income level.",
-            "where": f"Section 4 -> Province-Specific Credits And Schedules and Outside This Estimator -> {screening['province_name']} benefit guidance",
+            "where": f"Step 5 -> Province-Specific Credits And Schedules and Outside This Estimator -> {screening['province_name']} benefit guidance",
             "estimated_here": False,
             "confidence": "low",
         })
@@ -181,7 +181,7 @@ def build_eligibility_guidance(
             "priority": "maybe",
             "what": "Check for deductions and common credits even if you already entered all your slips.",
             "why": "Many first-time filers miss claimable items simply because they stop after entering slips.",
-            "where": "Section 3 -> Deductions and Section 4 -> Common Credits And Claim Amounts",
+            "where": "Step 4 -> Deductions and Step 5 -> Common Credits And Claim Amounts",
             "estimated_here": True,
             "confidence": "high",
         })

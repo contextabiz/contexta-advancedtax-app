@@ -51,7 +51,7 @@ def build_suggestions(
             "start_with_slips",
             "Start with your slips.",
             "Most returns should begin with T-slips before deductions or credits.",
-            "Section 1A -> Slips And Source Records",
+            "Step 1 -> Slips",
             "important",
         )
 
@@ -95,7 +95,7 @@ def build_suggestions(
             "review_deductions",
             "Review deductions.",
             "Deductions are one of the most common places where first-time users miss tax savings.",
-            "Section 3 -> Deductions",
+            "Step 4 -> Deductions",
             "review",
         )
     if screening["had_medical_expenses"] or screening["made_donations"]:
@@ -103,7 +103,7 @@ def build_suggestions(
             "review_common_credits",
             "Review common credits.",
             "Medical expenses and donations are common items that change the final result.",
-            "Section 4 -> Common Credits And Claim Amounts",
+            "Step 5 -> Common Credits And Claim Amounts",
             "maybe",
         )
     if screening["had_foreign_income"] or screening["had_investment_income"]:
@@ -111,7 +111,7 @@ def build_suggestions(
             "review_income_and_foreign_tax",
             "Review income and foreign-tax details.",
             "Investment and foreign-income entries are more error-prone and often worth a second look.",
-            "Section 2 -> Income And Investment and Section 4 -> Foreign Tax And Dividend Credits",
+            "Step 3 -> Income And Investment and Step 5 -> Foreign Tax And Dividend Credits",
             "maybe",
         )
     return suggestions

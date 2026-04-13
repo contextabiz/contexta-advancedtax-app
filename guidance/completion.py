@@ -60,7 +60,7 @@ def build_completion_flags(
             "spouse_not_reviewed",
             "review",
             "A spouse or partner may be relevant here. If you had a spouse or common-law partner at year end and have not reviewed the spouse amount settings yet, you may still have spouse-related credits or benefit eligibility to check.",
-            "Section 4 -> Household And Dependants",
+            "Step 5 -> Household And Dependants",
             "spouse_amount",
         )
     if "spouse_requires_year_end_status" in eligibility_decision["review_flags"]:
@@ -74,7 +74,7 @@ def build_completion_flags(
             "dependants_not_reviewed",
             "review",
             "Dependants are indicated, but household-related credits do not look reviewed yet.",
-            "Section 4 -> Household And Dependants",
+            "Step 5 -> Household And Dependants",
             "household_dependants",
         )
     if "eligible_dependant_other_claimant" in rule_result_by_id:
@@ -94,7 +94,7 @@ def build_completion_flags(
             "tuition_not_reviewed",
             "review",
             "Tuition or student-loan signals are showing, but tuition claims or carryforwards do not look reviewed yet.",
-            "Section 4 -> Common Credits And Claim Amounts",
+            "Step 5 -> Common Credits And Claim Amounts",
             "tuition_and_student",
         )
     if "training_credit_limit_zero" in eligibility_decision["review_flags"]:
@@ -105,7 +105,7 @@ def build_completion_flags(
             "common_credits_not_reviewed",
             "review",
             "Medical expenses or donations are indicated, but section 4 credits do not look reviewed yet.",
-            "Section 4 -> Common Credits And Claim Amounts",
+            "Step 5 -> Common Credits And Claim Amounts",
             "medical_and_donations",
         )
     if (screening["had_work_expenses"] or screening["had_moving_expenses"] or screening["had_child_care_expenses"]) and progress["section_3_deductions"] == "not_started":
@@ -113,7 +113,7 @@ def build_completion_flags(
             "deductions_not_reviewed",
             "review",
             "Possible deduction items are indicated, but section 3 does not look reviewed yet.",
-            "Section 3 -> Deductions",
+            "Step 4 -> Deductions",
             "deductions_review",
         )
     if (screening["had_foreign_income"] or screening["had_investment_income"]) and progress["section_2_income"] == "not_started":
@@ -121,7 +121,7 @@ def build_completion_flags(
             "income_not_reviewed",
             "review",
             "Investment or foreign-income signals are showing, but section 2 does not look reviewed yet.",
-            "Section 2 -> Income And Investment",
+            "Step 3 -> Income And Investment",
             "foreign_and_investment",
         )
     if screening["had_foreign_income"] and progress["foreign_tax_reviewed"] == "not_started":
@@ -129,7 +129,7 @@ def build_completion_flags(
             "foreign_tax_not_reviewed",
             "important",
             "Foreign-income signals are showing, but foreign-tax inputs do not look reviewed yet.",
-            "Section 4 -> Foreign Tax And Dividend Credits",
+            "Step 5 -> Foreign Tax And Dividend Credits",
             "foreign_and_investment",
         )
     if screening["low_income_self_assessed"] and progress["refundable_reviewed"] == "not_started":
@@ -137,7 +137,7 @@ def build_completion_flags(
             "refundable_not_reviewed",
             "info",
             "Low-income support may matter here, but refundable-credit inputs do not look reviewed yet.",
-            "Section 4 -> Refundable Credit Manual Amounts (Advanced)",
+            "Step 5 -> Refundable Credit Manual Amounts (Advanced)",
             "low_income_refundable",
         )
     if "cwb_not_enabled" in eligibility_decision["review_flags"] and progress["refundable_reviewed"] != "done":
@@ -151,7 +151,7 @@ def build_completion_flags(
             "slips_not_started",
             "info",
             "No slip entries are showing yet. Most users should start with slips before anything else.",
-            "Section 1A -> Slips And Source Records",
+            "Step 1 -> Slips",
             None,
         )
 
