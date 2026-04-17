@@ -96,6 +96,12 @@ def build_slip_reconciliation_df(
                 f"You paid ${slip_total:,.2f} of foreign tax, but only "
                 f"${return_used:,.2f} is claimable this year after the T2209/T2036 limits."
             )
+        if area == "Interest and other investment income" and return_used == slip_total + manual_extra:
+            if slip_total > 0 and manual_extra == 0:
+                return (
+                    "The line 12100 amount is being supported directly by slip-based interest or foreign non-business income "
+                    "amounts that flow into the return."
+                )
         if area == "Federal dividend tax credit" and return_used > slip_total:
             if slip_total == 0 and manual_extra > 0:
                 return (
@@ -150,7 +156,14 @@ def build_slip_reconciliation_df(
         {"Group": "Income", "Area": "Employment", "Slip Total": float(t4_wizard_totals.get("box14_employment_income", 0.0)), "Manual / Extra Input": employment_income_manual, "Return Amount Used": result.get("line_10100", 0.0), "Difference": result.get("line_10100", 0.0) - (float(t4_wizard_totals.get("box14_employment_income", 0.0)) + employment_income_manual)},
         {"Group": "Income", "Area": "Pension", "Slip Total": float(t4a_wizard_totals.get("box16_pension", 0.0)) + float(t3_wizard_totals.get("box31_pension_income", 0.0)), "Manual / Extra Input": pension_income_manual, "Return Amount Used": result.get("line_pension_income", 0.0), "Difference": result.get("line_pension_income", 0.0) - (float(t4a_wizard_totals.get("box16_pension", 0.0)) + float(t3_wizard_totals.get("box31_pension_income", 0.0)) + pension_income_manual)},
         {"Group": "Income", "Area": "Other income", "Slip Total": float(t4a_wizard_totals.get("box18_lump_sum", 0.0)) + float(t4a_wizard_totals.get("box28_other_income", 0.0)) + float(t3_wizard_totals.get("box26_other_income", 0.0)) + float(t4ps_wizard_totals.get("box35_other_employment_income", 0.0)), "Manual / Extra Input": other_income_manual, "Return Amount Used": result.get("line_other_income", 0.0), "Difference": result.get("line_other_income", 0.0) - (float(t4a_wizard_totals.get("box18_lump_sum", 0.0)) + float(t4a_wizard_totals.get("box28_other_income", 0.0)) + float(t3_wizard_totals.get("box26_other_income", 0.0)) + float(t4ps_wizard_totals.get("box35_other_employment_income", 0.0)) + other_income_manual)},
-        {"Group": "Income", "Area": "Interest", "Slip Total": float(t5_wizard_totals.get("box13_interest", 0.0)), "Manual / Extra Input": interest_income_manual, "Return Amount Used": result.get("line_interest_income", 0.0), "Difference": result.get("line_interest_income", 0.0) - (float(t5_wizard_totals.get("box13_interest", 0.0)) + interest_income_manual)},
+        {
+            "Group": "Income",
+            "Area": "Interest and other investment income",
+            "Slip Total": float(t5_wizard_totals.get("box13_interest", 0.0)) + foreign_income_slip_total,
+            "Manual / Extra Input": interest_income_manual,
+            "Return Amount Used": result.get("line_interest_income", 0.0),
+            "Difference": result.get("line_interest_income", 0.0) - (float(t5_wizard_totals.get("box13_interest", 0.0)) + foreign_income_slip_total + interest_income_manual),
+        },
         {"Group": "Income", "Area": "Eligible dividends", "Slip Total": eligible_dividend_slip_total, "Manual / Extra Input": clip_non_negative(result.get("taxable_eligible_dividends", 0.0) - eligible_dividend_slip_total), "Return Amount Used": result.get("taxable_eligible_dividends", 0.0), "Difference": result.get("taxable_eligible_dividends", 0.0) - (eligible_dividend_slip_total + clip_non_negative(result.get("taxable_eligible_dividends", 0.0) - eligible_dividend_slip_total))},
         {"Group": "Income", "Area": "Non-eligible dividends", "Slip Total": non_eligible_dividend_slip_total, "Manual / Extra Input": clip_non_negative(result.get("taxable_non_eligible_dividends", 0.0) - non_eligible_dividend_slip_total), "Return Amount Used": result.get("taxable_non_eligible_dividends", 0.0), "Difference": result.get("taxable_non_eligible_dividends", 0.0) - (non_eligible_dividend_slip_total + clip_non_negative(result.get("taxable_non_eligible_dividends", 0.0) - non_eligible_dividend_slip_total))},
         {"Group": "Credits", "Area": "Foreign income", "Slip Total": foreign_income_slip_total, "Manual / Extra Input": clip_non_negative(result.get("t2209_net_foreign_non_business_income", 0.0) - foreign_income_slip_total), "Return Amount Used": result.get("t2209_net_foreign_non_business_income", 0.0), "Difference": result.get("t2209_net_foreign_non_business_income", 0.0) - (foreign_income_slip_total + clip_non_negative(result.get("t2209_net_foreign_non_business_income", 0.0) - foreign_income_slip_total))},

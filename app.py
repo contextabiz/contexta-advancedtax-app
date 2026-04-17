@@ -702,6 +702,75 @@ def format_plain_number(value: float) -> str:
     return f"{int(value)}" if float(value).is_integer() else f"{value:.2f}"
 
 
+def render_suggestion_cards(suggestions: "list[SuggestionItem]") -> None:
+    if not suggestions:
+        return
+
+    def classify_suggestion(item: "SuggestionItem") -> tuple[str, str, str, str]:
+        label = item["label"]
+        reason = item["reason"]
+        where = item["where"]
+        combined = f"{label} {reason}".lower()
+        if "outside this estimator" in where.lower():
+            return (
+                "Not Included - Review Separately",
+                "Not Included - Review Separately",
+                "#8A5315",
+                "#181F2E",
+            )
+        if any(token in combined for token in ["already been included", "included in your current estimate", "active (preview"]):
+            return (
+                "Included In Your Estimate",
+                "Included In Your Estimate",
+                "#1E8E53",
+                "#141C2C",
+            )
+        return (
+            "Review In This Estimator",
+            "Review In This Estimator",
+            "#2E6FDC",
+            "#141C2C",
+        )
+
+    grouped_items: dict[str, list[tuple[SuggestionItem, str, str, str]]] = {
+        "Included In Your Estimate": [],
+        "Review In This Estimator": [],
+        "Not Included - Review Separately": [],
+    }
+    for item in suggestions:
+        group_label, pill_label, pill_color, card_bg = classify_suggestion(item)
+        grouped_items[group_label].append((item, pill_label, pill_color, card_bg))
+
+    with st.container(border=True):
+        st.markdown("##### Recommended Next Checks")
+        for group_name in [
+            "Included In Your Estimate",
+            "Review In This Estimator",
+            "Not Included - Review Separately",
+        ]:
+            group_items = grouped_items[group_name]
+            if not group_items:
+                continue
+            st.markdown(f"**{group_name}**")
+            for item, pill_label, pill_color, card_bg in group_items:
+                with st.container():
+                    st.markdown(
+                        (
+                            f"<div style='background:{card_bg};border:1px solid rgba(255,255,255,0.08);"
+                            f"border-radius:16px;padding:18px 18px 16px 18px;margin:10px 0 12px 0;'>"
+                            f"<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;'>"
+                            f"<span style='display:inline-block;padding:5px 12px;border-radius:999px;"
+                            f"background:{pill_color};color:white;font-weight:700;font-size:0.80rem;line-height:1.2;'>{pill_label}</span>"
+                            f"<span style='font-weight:700;font-size:1.04rem;color:#FFFFFF;'>{item['label']}</span>"
+                            f"</div>"
+                            f"<div style='margin:0 0 8px 0;color:#E8EDF7;line-height:1.6;'><strong>What this means:</strong> {item['reason']}</div>"
+                            f"<div style='margin:0;color:#E8EDF7;line-height:1.6;'><strong>Next step:</strong> {item['where']}</div>"
+                            f"</div>"
+                        ),
+                        unsafe_allow_html=True,
+                    )
+
+
 def render_answer_summary_sheet(
     result: dict,
     province_name: str,
@@ -738,14 +807,7 @@ def render_answer_summary_sheet(
     )
     st.caption(f"Filing snapshot: Ready {ready_count}, Review {review_count}, Missing {missing_count}.")
     if suggestions:
-        with st.container(border=True):
-            st.markdown("##### Suggestion")
-            for item in suggestions:
-                st.markdown(
-                    f"- [ ] {item['label']}  \n"
-                    f"  `Why:` {item['reason']}  \n"
-                    f"  `Where to go:` `{item['where']}`"
-                )
+        render_suggestion_cards(suggestions)
 
 
 def render_flow_stepper(current_step: int) -> None:
@@ -1457,11 +1519,15 @@ def read_slip_wizard_records_from_state(configs: list[dict[str, object]]) -> dic
         stored_records = st.session_state.get(card_key)
         if isinstance(stored_records, list):
             normalized_records: list[dict[str, float]] = []
-            for stored_record in stored_records:
+            for index, stored_record in enumerate(stored_records):
                 normalized_record: dict[str, float] = {}
                 for field in fields:
                     field_id = str(field["id"])
-                    normalized_record[field_id] = float((stored_record or {}).get(field_id, 0.0))
+                    widget_key = f"{card_key}_{index}_{field_id}"
+                    if widget_key in st.session_state:
+                        normalized_record[field_id] = float(st.session_state.get(widget_key, 0.0))
+                    else:
+                        normalized_record[field_id] = float((stored_record or {}).get(field_id, 0.0))
                 normalized_records.append(normalized_record)
             records_by_key[card_key] = normalized_records
             continue
@@ -1797,21 +1863,21 @@ spouse_disability_transfer_available = bool(st.session_state.get("spouse_disabil
 spouse_disability_transfer_available_amount = float(st.session_state.get("spouse_disability_transfer_available_amount", st.session_state.get("persist_spouse_disability_transfer_available_amount", 0.0)))
 spouse_net_income = float(st.session_state.get("spouse_net_income", st.session_state.get("persist_spouse_net_income", 0.0)))
 eligible_dependant_claim_enabled = bool(st.session_state.get("eligible_dependant_claim_enabled", st.session_state.get("persist_eligible_dependant_claim_enabled", False)))
-eligible_dependant_infirm = bool(st.session_state.get("eligible_dependant_infirm", False))
-dependant_lived_with_you = bool(st.session_state.get("dependant_lived_with_you", False))
+eligible_dependant_infirm = bool(st.session_state.get("eligible_dependant_infirm", st.session_state.get("persist_eligible_dependant_infirm", False)))
+dependant_lived_with_you = bool(st.session_state.get("dependant_lived_with_you", st.session_state.get("persist_dependant_lived_with_you", False)))
 eligible_dependant_net_income = float(st.session_state.get("eligible_dependant_net_income", st.session_state.get("persist_eligible_dependant_net_income", 0.0)))
-dependant_relationship = str(st.session_state.get("dependant_relationship", "Child"))
-dependant_category = str(st.session_state.get("dependant_category", "Minor child"))
-dependant_disability_transfer_available = bool(st.session_state.get("dependant_disability_transfer_available", False))
-dependant_disability_transfer_available_amount = float(st.session_state.get("dependant_disability_transfer_available_amount", 0.0))
-paid_child_support_for_dependant = bool(st.session_state.get("paid_child_support_for_dependant", False))
-shared_custody_claim_agreement = bool(st.session_state.get("shared_custody_claim_agreement", False))
-another_household_member_claims_dependant = bool(st.session_state.get("another_household_member_claims_dependant", False))
-another_household_member_claims_caregiver = bool(st.session_state.get("another_household_member_claims_caregiver", False))
-another_household_member_claims_disability_transfer = bool(st.session_state.get("another_household_member_claims_disability_transfer", False))
-medical_dependant_claim_shared = bool(st.session_state.get("medical_dependant_claim_shared", False))
-caregiver_claim_target = str(st.session_state.get("caregiver_claim_target", "Auto"))
-disability_transfer_source = str(st.session_state.get("disability_transfer_source", "Auto"))
+dependant_relationship = str(st.session_state.get("dependant_relationship", st.session_state.get("persist_dependant_relationship", "Child")))
+dependant_category = str(st.session_state.get("dependant_category", st.session_state.get("persist_dependant_category", "Minor child")))
+dependant_disability_transfer_available = bool(st.session_state.get("dependant_disability_transfer_available", st.session_state.get("persist_dependant_disability_transfer_available", False)))
+dependant_disability_transfer_available_amount = float(st.session_state.get("dependant_disability_transfer_available_amount", st.session_state.get("persist_dependant_disability_transfer_available_amount", 0.0)))
+paid_child_support_for_dependant = bool(st.session_state.get("paid_child_support_for_dependant", st.session_state.get("persist_paid_child_support_for_dependant", False)))
+shared_custody_claim_agreement = bool(st.session_state.get("shared_custody_claim_agreement", st.session_state.get("persist_shared_custody_claim_agreement", False)))
+another_household_member_claims_dependant = bool(st.session_state.get("another_household_member_claims_dependant", st.session_state.get("persist_another_household_member_claims_dependant", False)))
+another_household_member_claims_caregiver = bool(st.session_state.get("another_household_member_claims_caregiver", st.session_state.get("persist_another_household_member_claims_caregiver", False)))
+another_household_member_claims_disability_transfer = bool(st.session_state.get("another_household_member_claims_disability_transfer", st.session_state.get("persist_another_household_member_claims_disability_transfer", False)))
+medical_dependant_claim_shared = bool(st.session_state.get("medical_dependant_claim_shared", st.session_state.get("persist_medical_dependant_claim_shared", False)))
+caregiver_claim_target = str(st.session_state.get("caregiver_claim_target", st.session_state.get("persist_caregiver_claim_target", "Auto")))
+disability_transfer_source = str(st.session_state.get("disability_transfer_source", st.session_state.get("persist_disability_transfer_source", "Auto")))
 spouse_amount_claim = float(st.session_state.get("spouse_amount_claim", st.session_state.get("persist_spouse_amount_claim", 0.0)))
 eligible_dependant_claim = float(st.session_state.get("eligible_dependant_claim", st.session_state.get("persist_eligible_dependant_claim", 0.0)))
 age_amount_claim = float(st.session_state.get("age_amount_claim", 0.0))
@@ -1862,11 +1928,11 @@ refundable_credits_engine_total = (
 )
 ontario_fertility_treatment_expenses = float(st.session_state.get("ontario_fertility_treatment_expenses", 0.0))
 ontario_seniors_public_transit_expenses = float(st.session_state.get("ontario_seniors_public_transit_expenses", 0.0))
-bc_renters_credit_eligible = bool(st.session_state.get("bc_renters_credit_eligible", False))
+bc_renters_credit_eligible = bool(st.session_state.get("bc_renters_credit_eligible", st.session_state.get("persist_bc_renters_credit_eligible", False)))
 bc_home_renovation_expenses = float(st.session_state.get("bc_home_renovation_expenses", 0.0))
-bc_home_renovation_eligible = bool(st.session_state.get("bc_home_renovation_eligible", False))
+bc_home_renovation_eligible = bool(st.session_state.get("bc_home_renovation_eligible", st.session_state.get("persist_bc_home_renovation_eligible", False)))
 sk_fertility_treatment_expenses = float(st.session_state.get("sk_fertility_treatment_expenses", 0.0))
-pe_volunteer_credit_eligible = bool(st.session_state.get("pe_volunteer_credit_eligible", False))
+pe_volunteer_credit_eligible = bool(st.session_state.get("pe_volunteer_credit_eligible", st.session_state.get("persist_pe_volunteer_credit_eligible", False)))
 mb479_personal_tax_credit = float(st.session_state.get("mb479_personal_tax_credit", 0.0))
 mb479_homeowners_affordability_credit = float(st.session_state.get("mb479_homeowners_affordability_credit", 0.0))
 mb479_renters_affordability_credit = float(st.session_state.get("mb479_renters_affordability_credit", 0.0))
@@ -1914,15 +1980,15 @@ if current_step == 1:
     t2202_wizard_records = wizard_records["t2202_wizard"]
     nav_col1, nav_col2 = st.columns([1, 1])
     with nav_col2:
-        if st.button("Next: Property and Capital Schedules", key="next_step_1", use_container_width=True):
+        if st.button("Next", key="next_step_1", use_container_width=True):
             st.session_state["current_flow_step"] = 2
             st.rerun()
 
 if current_step == 2:
     st.markdown("### 2) Property and Capital Schedules")
     st.caption("Only open this if you have rental properties, real estate sales, share sales, crypto, or other capital-property activity. If none of these apply, you can go straight to Next.")
-    property_tabs = st.tabs(["Rental Properties", "Capital Gains Schedule"])
-    with property_tabs[0]:
+    with st.expander("Rental", expanded=False):
+        st.caption("Open this only if you have rental income or rental expenses.")
         rental_schedule_df = render_record_card_editor(
         "Rental Properties",
         "rental_schedules",
@@ -1948,7 +2014,8 @@ if current_step == 2:
         ],
         "Enter one card per property. The app totals the main T776 expense categories and then subtracts CCA.",
     )
-    with property_tabs[1]:
+    with st.expander("Capital Gains", expanded=False):
+        st.caption("Open this only if you sold shares, real estate, crypto, or other capital property.")
         capital_schedule_df = render_record_card_editor(
         "Capital Gains Schedule",
         "capital_gain_schedules",
@@ -1980,11 +2047,11 @@ if current_step == 2:
     )
     nav_col1, nav_col2 = st.columns([1, 1])
     with nav_col1:
-        if st.button("Back: Slips", key="back_step_2", use_container_width=True):
+        if st.button("Back", key="back_step_2", use_container_width=True):
             st.session_state["current_flow_step"] = 1
             st.rerun()
     with nav_col2:
-        if st.button("Next: Income and Investment", key="next_step_2", use_container_width=True):
+        if st.button("Next", key="next_step_2", use_container_width=True):
             st.session_state["current_flow_step"] = 3
             st.rerun()
 
@@ -2106,6 +2173,23 @@ other_income = (
 net_rental_income = manual_net_rental_income + t776_net_rental_income
 taxable_capital_gains = manual_taxable_capital_gains + schedule3_taxable_capital_gains
 interest_income = interest_income_manual + float(t5_wizard_totals.get("box13_interest", 0.0))
+t5_eligible_dividends_taxable += float(t5_wizard_totals.get("box25_eligible_dividends_taxable", 0.0))
+t5_eligible_dividends_taxable += float(t4ps_wizard_totals.get("box31_eligible_dividends_taxable", 0.0))
+t5_non_eligible_dividends_taxable += float(t5_wizard_totals.get("box11_non_eligible_dividends_taxable", 0.0))
+t5_non_eligible_dividends_taxable += float(t4ps_wizard_totals.get("box25_non_eligible_dividends_taxable", 0.0))
+t5_federal_dividend_credit += float(t5_wizard_totals.get("box26_eligible_dividend_credit", 0.0))
+t5_federal_dividend_credit += float(t5_wizard_totals.get("box12_non_eligible_dividend_credit", 0.0))
+t5_federal_dividend_credit += float(t4ps_wizard_totals.get("box26_non_eligible_dividend_credit", 0.0))
+t5_federal_dividend_credit += float(t4ps_wizard_totals.get("box32_eligible_dividend_credit", 0.0))
+t3_eligible_dividends_taxable += float(t3_wizard_totals.get("box50_eligible_dividends_taxable", 0.0))
+t3_non_eligible_dividends_taxable += float(t3_wizard_totals.get("box32_non_eligible_dividends_taxable", 0.0))
+t3_federal_dividend_credit += float(t3_wizard_totals.get("box51_eligible_dividend_credit", 0.0))
+t3_federal_dividend_credit += float(t3_wizard_totals.get("box39_non_eligible_dividend_credit", 0.0))
+foreign_income += float(t5_wizard_totals.get("box15_foreign_income", 0.0))
+foreign_income += float(t3_wizard_totals.get("box25_foreign_income", 0.0))
+foreign_income += float(t4ps_wizard_totals.get("box37_foreign_non_business_income", 0.0))
+foreign_tax_paid += float(t5_wizard_totals.get("box16_foreign_tax_paid", 0.0))
+foreign_tax_paid += float(t3_wizard_totals.get("box34_foreign_tax_paid", 0.0))
 medical_expenses_eligible = float(st.session_state.get("medical_expenses_eligible", 0.0))
 income_tax_withheld_total = (
     income_tax_withheld
@@ -2118,85 +2202,87 @@ ei_withheld_total = ei_withheld + float(t4_wizard_totals.get("box18_ei", 0.0))
 if current_step == 3:
     st.markdown("### 3) Income and Investment")
     st.caption("Most users can skip this section if all of their income is already covered by slips. Use it only for extra income, manual additions, or when you want a clearer worksheet trail.")
-    st.markdown("#### Income")
-    income_col1, income_col2, income_col3 = st.columns(3)
-    employment_income_manual = number_input("Manual Employment Income", "employment_income", 1000.0)
-    pension_income_manual = number_input("Manual Pension / Annuity Income", "pension_income", 500.0)
-    rrsp_rrif_income_manual = number_input(
-        "Manual RRSP / RRIF Income",
-        "rrsp_rrif_income",
-        500.0,
-        "Use this for taxable RRSP/RRIF withdrawals or similar line 12800-style income not already captured elsewhere.",
-    )
-    other_income_manual = number_input("Manual Other Taxable Income", "other_income", 500.0)
-    manual_net_rental_income = number_input(
-        "Manual Additional Net Rental Income",
-        "net_rental_income",
-        500.0,
-        "Use this only for net rental income not already entered through the T776 property cards above.",
-    )
-    manual_taxable_capital_gains = number_input(
-        "Manual Additional Taxable Capital Gains",
-        "taxable_capital_gains",
-        500.0,
-        "Use this only for taxable capital gains not already captured in Schedule 3 cards or T4PS box 34.",
-    )
-    interest_income_manual = number_input(
-        "Manual Interest / Investment Income",
-        "interest_income",
-        100.0,
-        "Line 12100-style interest or other investment income not already captured by T5/T3 slips.",
-    )
-    eligible_dividends = number_input(
-        "Eligible Dividends (cash received, before gross-up)",
-        "eligible_dividends",
-        100.0,
-        "Enter the actual cash dividend received. Do not gross this up yourself. Example: if you received $100 cash, enter $100, not $138.",
-    )
-    non_eligible_dividends = number_input(
-        "Non-Eligible Dividends (cash received, before gross-up)",
-        "non_eligible_dividends",
-        100.0,
-        "Enter the actual cash dividend received. Do not gross this up yourself.",
-    )
+    with st.expander("Common Income", expanded=False):
+        st.caption("Open this only if you need income not already covered by slips.")
+        income_col1, income_col2, income_col3 = st.columns(3)
+        employment_income_manual = number_input("Manual Employment Income", "employment_income", 1000.0)
+        pension_income_manual = number_input("Manual Pension / Annuity Income", "pension_income", 500.0)
+        rrsp_rrif_income_manual = number_input(
+            "Manual RRSP / RRIF Income",
+            "rrsp_rrif_income",
+            500.0,
+            "Use this for taxable RRSP/RRIF withdrawals or similar line 12800-style income not already captured elsewhere.",
+        )
+        other_income_manual = number_input("Manual Other Taxable Income", "other_income", 500.0)
+        manual_net_rental_income = number_input(
+            "Manual Additional Net Rental Income",
+            "net_rental_income",
+            500.0,
+            "Use this only for net rental income not already entered through the T776 property cards above.",
+        )
+        manual_taxable_capital_gains = number_input(
+            "Manual Additional Taxable Capital Gains",
+            "taxable_capital_gains",
+            500.0,
+            "Use this only for taxable capital gains not already captured in Schedule 3 cards or T4PS box 34.",
+        )
+        interest_income_manual = number_input(
+            "Manual Interest / Investment Income",
+            "interest_income",
+            100.0,
+            "Line 12100-style interest or other investment income not already captured by T5/T3 slips.",
+        )
+        eligible_dividends = number_input(
+            "Eligible Dividends (cash received, before gross-up)",
+            "eligible_dividends",
+            100.0,
+            "Enter the actual cash dividend received. Do not gross this up yourself. Example: if you received $100 cash, enter $100, not $138.",
+        )
+        non_eligible_dividends = number_input(
+            "Non-Eligible Dividends (cash received, before gross-up)",
+            "non_eligible_dividends",
+            100.0,
+            "Enter the actual cash dividend received. Do not gross this up yourself.",
+        )
 
-    st.markdown("#### Dividend Slips")
-    div_col1, div_col2, div_col3 = st.columns(3)
-    t5_eligible_dividends_taxable = number_input(
-        "T5 Eligible Dividends Taxable Amount (grossed-up slip amount)",
-        "t5_eligible_dividends_taxable",
-        100.0,
-        "Use the taxable amount shown on the slip, not the cash amount. If you already entered a manual cash dividend above for the same amount, do not enter it again here.",
-    )
-    t5_non_eligible_dividends_taxable = number_input(
-        "T5 Other Than Eligible Dividends Taxable Amount (grossed-up slip amount)",
-        "t5_non_eligible_dividends_taxable",
-        100.0,
-        "Use the taxable amount shown on the slip. Do not add the same dividend again as a manual cash amount above.",
-    )
-    t5_federal_dividend_credit = number_input(
-        "T5 Federal Dividend Tax Credit",
-        "t5_federal_dividend_credit",
-        10.0,
-        "If your T5/T3 slips already show the federal dividend tax credit, enter it here to override auto-estimation for those slips.",
-    )
-    t3_eligible_dividends_taxable = number_input(
-        "T3 Eligible Dividends Taxable Amount (grossed-up slip amount)",
-        "t3_eligible_dividends_taxable",
-        100.0,
-        "Use the taxable amount from the T3 slip. Skip this if the amount is already captured through the slip wizard.",
-    )
-    t3_non_eligible_dividends_taxable = number_input(
-        "T3 Other Than Eligible Dividends Taxable Amount (grossed-up slip amount)",
-        "t3_non_eligible_dividends_taxable",
-        100.0,
-        "Use the taxable amount from the T3 slip. Skip this if the amount is already captured through the slip wizard.",
-    )
-    t3_federal_dividend_credit = number_input(
-        "T3 Federal Dividend Tax Credit",
-        "t3_federal_dividend_credit",
-        10.0,
-    )
+    with st.expander("Dividend Details", expanded=False):
+        st.caption("Open this only if you need to review or adjust dividend slip amounts.")
+        div_col1, div_col2, div_col3 = st.columns(3)
+        t5_eligible_dividends_taxable = number_input(
+            "T5 Eligible Dividends Taxable Amount (grossed-up slip amount)",
+            "t5_eligible_dividends_taxable",
+            100.0,
+            "Use the taxable amount shown on the slip, not the cash amount. If you already entered a manual cash dividend above for the same amount, do not enter it again here.",
+        )
+        t5_non_eligible_dividends_taxable = number_input(
+            "T5 Other Than Eligible Dividends Taxable Amount (grossed-up slip amount)",
+            "t5_non_eligible_dividends_taxable",
+            100.0,
+            "Use the taxable amount shown on the slip. Do not add the same dividend again as a manual cash amount above.",
+        )
+        t5_federal_dividend_credit = number_input(
+            "T5 Federal Dividend Tax Credit",
+            "t5_federal_dividend_credit",
+            10.0,
+            "If your T5/T3 slips already show the federal dividend tax credit, enter it here to override auto-estimation for those slips.",
+        )
+        t3_eligible_dividends_taxable = number_input(
+            "T3 Eligible Dividends Taxable Amount (grossed-up slip amount)",
+            "t3_eligible_dividends_taxable",
+            100.0,
+            "Use the taxable amount from the T3 slip. Skip this if the amount is already captured through the slip wizard.",
+        )
+        t3_non_eligible_dividends_taxable = number_input(
+            "T3 Other Than Eligible Dividends Taxable Amount (grossed-up slip amount)",
+            "t3_non_eligible_dividends_taxable",
+            100.0,
+            "Use the taxable amount from the T3 slip. Skip this if the amount is already captured through the slip wizard.",
+        )
+        t3_federal_dividend_credit = number_input(
+            "T3 Federal Dividend Tax Credit",
+            "t3_federal_dividend_credit",
+            10.0,
+        )
 
     employment_income = (
         employment_income_manual
@@ -2221,10 +2307,6 @@ if current_step == 3:
         interest_income_manual
         + float(t5_wizard_totals.get("box13_interest", 0.0))
     )
-    t5_eligible_dividends_taxable += float(t5_wizard_totals.get("box25_eligible_dividends_taxable", 0.0))
-    t5_eligible_dividends_taxable += float(t4ps_wizard_totals.get("box31_eligible_dividends_taxable", 0.0))
-    t5_non_eligible_dividends_taxable += float(t5_wizard_totals.get("box11_non_eligible_dividends_taxable", 0.0))
-    t5_non_eligible_dividends_taxable += float(t4ps_wizard_totals.get("box25_non_eligible_dividends_taxable", 0.0))
     federal_dividend_credit_slip_total = (
         float(t5_wizard_totals.get("box26_eligible_dividend_credit", 0.0))
         + float(t5_wizard_totals.get("box12_non_eligible_dividend_credit", 0.0))
@@ -2233,11 +2315,6 @@ if current_step == 3:
         + float(t4ps_wizard_totals.get("box32_eligible_dividend_credit", 0.0))
         + float(t4ps_wizard_totals.get("box26_non_eligible_dividend_credit", 0.0))
     )
-    t5_federal_dividend_credit += float(t5_wizard_totals.get("box26_eligible_dividend_credit", 0.0)) + float(t5_wizard_totals.get("box12_non_eligible_dividend_credit", 0.0))
-    t5_federal_dividend_credit += float(t4ps_wizard_totals.get("box26_non_eligible_dividend_credit", 0.0)) + float(t4ps_wizard_totals.get("box32_eligible_dividend_credit", 0.0))
-    t3_eligible_dividends_taxable += float(t3_wizard_totals.get("box50_eligible_dividends_taxable", 0.0))
-    t3_non_eligible_dividends_taxable += float(t3_wizard_totals.get("box32_non_eligible_dividends_taxable", 0.0))
-    t3_federal_dividend_credit += float(t3_wizard_totals.get("box51_eligible_dividend_credit", 0.0)) + float(t3_wizard_totals.get("box39_non_eligible_dividend_credit", 0.0))
 
     t4_reference_box24_total = (
         float(t4_wizard_totals.get("box24_ei_insurable_earnings", 0.0))
@@ -2248,7 +2325,7 @@ if current_step == 3:
     t4_reference_box52_total = (
         float(t4_wizard_totals.get("box52_pension_adjustment", 0.0))
     )
-    with st.expander("Input Totals and T4 Reference", expanded=False):
+    with st.expander("Advanced Totals and T4 Reference", expanded=False):
         st.dataframe(
             build_currency_df(
                 [
@@ -2360,76 +2437,81 @@ if current_step == 3:
         )
     nav_col1, nav_col2 = st.columns([1, 1])
     with nav_col1:
-        if st.button("Back: Property and Capital Schedules", key="back_step_3", use_container_width=True):
+        if st.button("Back", key="back_step_3", use_container_width=True):
             st.session_state["current_flow_step"] = 2
             st.rerun()
     with nav_col2:
-        if st.button("Next: Deductions", key="next_step_3", use_container_width=True):
+        if st.button("Next", key="next_step_3", use_container_width=True):
             st.session_state["current_flow_step"] = 4
             st.rerun()
 
 if current_step == 4:
     st.markdown("### 4) Deductions")
     st.caption("Use this section only if you have deductions that reduce income, such as RRSP or FHSA contributions, moving expenses, child care, support payments, or investment carrying charges. If you only have slips and no extra deductions, you can usually skip it.")
-    st.markdown("#### Registered Plans And Payroll Deductions")
-    ded_col1, ded_col2, ded_col3 = st.columns(3)
-    rrsp_deduction = number_input(
-        "RRSP Deduction Claimed This Year (line 20800)",
-        "rrsp_deduction",
-        500.0,
-        "Enter the amount you are claiming as a deduction this year, not just the amount contributed if you plan to carry some of it forward.",
-    )
-    fhsa_deduction = number_input(
-        "FHSA Deduction Claimed This Year (line 20805)",
-        "fhsa_deduction",
-        500.0,
-        "Enter the amount you are claiming this year. If you contributed but are not deducting the full amount now, enter only the part claimed.",
-    )
-    rpp_contribution = number_input("RPP Contribution", "rpp_contribution", 500.0)
-    union_dues = number_input("Union / Professional Dues (line 22200)", "union_dues", 100.0)
-    st.markdown("#### Family, Work, And Moving Costs")
-    ded_col4, ded_col5, ded_col6 = st.columns(3)
-    child_care_expenses = number_input("Child Care Expenses (line 22100)", "child_care_expenses", 100.0)
-    moving_expenses = number_input("Moving Expenses (line 21900)", "moving_expenses", 100.0)
-    support_payments_deduction = number_input("Deductible Support Payments (line 22000)", "support_payments_deduction", 100.0)
-    st.markdown("#### Investment, Employment, And Carryforwards")
-    ded_col7, ded_col8, ded_col9 = st.columns(3)
-    carrying_charges = number_input(
-        "Carrying Charges / Investment Interest",
-        "carrying_charges",
-        100.0,
-        "Use this for deductible investment carrying charges or interest. Do not include personal credit-card or mortgage interest.",
-    )
-    other_employment_expenses = number_input(
-        "Other Employment Expenses (line 22900)",
-        "other_employment_expenses",
-        100.0,
-        "Use this for deductible employment expenses not already included elsewhere.",
-    )
-    other_deductions = number_input(
-        "Other Deductions",
-        "other_deductions",
-        100.0,
-        "Use this only for deductible amounts not already covered above so you do not double count them.",
-    )
-    net_capital_loss_carryforward = number_input(
-        "Net Capital Loss Carryforward",
-        "net_capital_loss_carryforward",
-        100.0,
-        "Line 25300-style deduction against taxable income.",
-    )
-    other_loss_carryforward = number_input(
-        "Other Loss Carryforward",
-        "other_loss_carryforward",
-        100.0,
-    )
+    with st.expander("Registered Plans and Payroll", expanded=False):
+        st.caption("Open this only if you are claiming RRSP, FHSA, RPP, or dues.")
+        ded_col1, ded_col2, ded_col3 = st.columns(3)
+        rrsp_deduction = number_input(
+            "RRSP Deduction Claimed This Year (line 20800)",
+            "rrsp_deduction",
+            500.0,
+            "Enter the amount you are claiming as a deduction this year, not just the amount contributed if you plan to carry some of it forward.",
+        )
+        fhsa_deduction = number_input(
+            "FHSA Deduction Claimed This Year (line 20805)",
+            "fhsa_deduction",
+            500.0,
+            "Enter the amount you are claiming this year. If you contributed but are not deducting the full amount now, enter only the part claimed.",
+        )
+        rpp_contribution = number_input("RPP Contribution", "rpp_contribution", 500.0)
+        union_dues = number_input("Union / Professional Dues (line 22200)", "union_dues", 100.0)
+
+    with st.expander("Family, Work, and Moving", expanded=False):
+        st.caption("Open this only if you have child care, moving, or support deductions.")
+        ded_col4, ded_col5, ded_col6 = st.columns(3)
+        child_care_expenses = number_input("Child Care Expenses (line 22100)", "child_care_expenses", 100.0)
+        moving_expenses = number_input("Moving Expenses (line 21900)", "moving_expenses", 100.0)
+        support_payments_deduction = number_input("Deductible Support Payments (line 22000)", "support_payments_deduction", 100.0)
+
+    with st.expander("Investment, Employment, and Carryforwards", expanded=False):
+        st.caption("Open this only if you have carrying charges, employment expenses, or loss carryforwards.")
+        ded_col7, ded_col8, ded_col9 = st.columns(3)
+        carrying_charges = number_input(
+            "Carrying Charges / Investment Interest",
+            "carrying_charges",
+            100.0,
+            "Use this for deductible investment carrying charges or interest. Do not include personal credit-card or mortgage interest.",
+        )
+        other_employment_expenses = number_input(
+            "Other Employment Expenses (line 22900)",
+            "other_employment_expenses",
+            100.0,
+            "Use this for deductible employment expenses not already included elsewhere.",
+        )
+        other_deductions = number_input(
+            "Other Deductions",
+            "other_deductions",
+            100.0,
+            "Use this only for deductible amounts not already covered above so you do not double count them.",
+        )
+        net_capital_loss_carryforward = number_input(
+            "Net Capital Loss Carryforward",
+            "net_capital_loss_carryforward",
+            100.0,
+            "Line 25300-style deduction against taxable income.",
+        )
+        other_loss_carryforward = number_input(
+            "Other Loss Carryforward",
+            "other_loss_carryforward",
+            100.0,
+        )
     nav_col1, nav_col2 = st.columns([1, 1])
     with nav_col1:
-        if st.button("Back: Income and Investment", key="back_step_4", use_container_width=True):
+        if st.button("Back", key="back_step_4", use_container_width=True):
             st.session_state["current_flow_step"] = 3
             st.rerun()
     with nav_col2:
-        if st.button("Next: Credits, Carryforwards, and Special Cases", key="next_step_4", use_container_width=True):
+        if st.button("Next", key="next_step_4", use_container_width=True):
             st.session_state["current_flow_step"] = 5
             st.rerun()
 rpp_contribution += float(t4_wizard_totals.get("box20_rpp", 0.0))
@@ -2438,10 +2520,48 @@ union_dues += float(t4_wizard_totals.get("box44_union_dues", 0.0))
 if current_step == 5:
     st.markdown("### 5) Credits, Carryforwards, and Special Cases")
     st.caption("Most users only need one or two parts of this section. Open the rest only if they apply to you.")
-    st.markdown("#### Common Credits And Claim Amounts")
-    st.caption("Open this part if you have tuition, medical expenses, donations, student loan interest, or other common claim amounts.")
-    with st.expander("Household And Dependants", expanded=False):
-        st.caption("Open this only if spouse, dependant, caregiver, disability-transfer, or shared-claim rules apply to you.")
+    with st.expander("Common Credits", expanded=False):
+        st.caption("Open this only if you have tuition, medical, donations, or student loan interest.")
+        spouse_amount_claim = number_input(
+            "Optional Manual Spouse / Common-Law Claim Amount",
+            "spouse_amount_claim",
+            100.0,
+            "Leave at 0 to use the app's auto estimate. Enter the claim amount base only if you are overriding it manually.",
+        )
+        eligible_dependant_claim = number_input(
+            "Eligible Dependant Claim Amount",
+            "eligible_dependant_claim",
+            100.0,
+        )
+        age_amount_claim = number_input(
+            "Age Amount Claim",
+            "age_amount_claim",
+            100.0,
+            "Enter the claim amount base if applicable.",
+        )
+        t2202_tuition_total = float(t2202_wizard_totals.get("box26_total_eligible_tuition", 0.0)) or float(t2202_wizard_totals.get("box23_session_tuition", 0.0))
+        student_loan_interest = number_input("Student Loan Interest", "student_loan_interest", 50.0)
+        medical_expenses_eligible = number_input(
+            "Optional Manual Medical Claim Amount",
+            "medical_expenses_eligible",
+            100.0,
+            "Optional manual amount. For 2025, the estimator auto-calculates the claim from the medical expenses paid field below.",
+        )
+        medical_expenses_paid = number_input(
+            "Medical Expenses Paid",
+            "medical_expenses_paid",
+            100.0,
+            "For 2025, the estimator automatically subtracts the CRA threshold and uses the remaining eligible amount.",
+        )
+        charitable_donations = number_input("Charitable Donations", "charitable_donations", 100.0)
+        refundable_credits = number_input(
+            "Other Manual Refundable Credits",
+            "refundable_credits",
+            100.0,
+            "Use this for refundable credits not otherwise listed below.",
+        )
+    with st.expander("Household and Dependants", expanded=False):
+        st.caption("Open this only if spouse, dependant, caregiver, or transfer rules apply.")
         household_tabs = st.tabs(["Your Household", "Dependant Details", "Claim Conflicts"])
         with household_tabs[0]:
             with st.container(border=True):
@@ -2610,8 +2730,8 @@ if current_step == 5:
                     key="disability_transfer_source",
                     help="Choose the source of the disability transfer when both spouse and dependant could qualify.",
                 )
-        with st.expander("Additional Dependants (Only If You Have More Than One)", expanded=False):
-            st.caption("Use this only if you have more than one dependant to review.")
+        with st.expander("Additional Dependants", expanded=False):
+            st.caption("Open this only if you have more than one dependant.")
             additional_dependants_df = render_record_card_editor(
                 "Additional Dependants",
                 "additional_dependants",
@@ -2652,46 +2772,8 @@ if current_step == 5:
                 "medical_expenses_amount",
             ].sum()
         )
-    spouse_amount_claim = number_input(
-        "Optional Manual Spouse / Common-Law Claim Amount",
-        "spouse_amount_claim",
-        100.0,
-        "Leave at 0 to use the app's auto estimate. Enter the claim amount base only if you are overriding it manually.",
-    )
-    eligible_dependant_claim = number_input(
-        "Eligible Dependant Claim Amount",
-        "eligible_dependant_claim",
-        100.0,
-    )
-    age_amount_claim = number_input(
-        "Age Amount Claim",
-        "age_amount_claim",
-        100.0,
-        "Enter the claim amount base if applicable.",
-    )
-    t2202_tuition_total = float(t2202_wizard_totals.get("box26_total_eligible_tuition", 0.0)) or float(t2202_wizard_totals.get("box23_session_tuition", 0.0))
-    student_loan_interest = number_input("Student Loan Interest", "student_loan_interest", 50.0)
-    medical_expenses_eligible = number_input(
-        "Optional Manual Medical Claim Amount",
-        "medical_expenses_eligible",
-        100.0,
-        "Optional manual amount. For 2025, the estimator auto-calculates the claim from the medical expenses paid field below.",
-    )
-    medical_expenses_paid = number_input(
-        "Medical Expenses Paid",
-        "medical_expenses_paid",
-        100.0,
-        "For 2025, the estimator automatically subtracts the CRA threshold and uses the remaining eligible amount.",
-    )
-    charitable_donations = number_input("Charitable Donations", "charitable_donations", 100.0)
-    refundable_credits = number_input(
-        "Other Manual Refundable Credits",
-        "refundable_credits",
-        100.0,
-        "Use this for refundable credits not otherwise listed below.",
-    )
-    with st.expander("Less Common Claim Amounts", expanded=False):
-        st.caption("Open this only if you are entering a less common claim amount or an optional manual amount.")
+    with st.expander("Less Common Claims", expanded=False):
+        st.caption("Open this only if you need a less common or manual claim amount.")
         disability_amount_claim = number_input(
             "Disability Amount Claim",
             "disability_amount_claim",
@@ -2720,8 +2802,8 @@ if current_step == 5:
             100.0,
             "Enter this as the final provincial credit amount in dollars.",
         )
-    with st.expander("Refundable Credit Manual Amounts (Advanced)", expanded=False):
-        st.caption("Open this only if you are entering a manual amount instead of the app's auto estimate.")
+    with st.expander("Refundable Credits", expanded=False):
+        st.caption("Open this only if you need refundable credits or manual overrides.")
         refundable_col1, refundable_col2 = st.columns(2)
         canada_workers_benefit = refundable_col1.number_input(
             "Canada Workers Benefit Manual Amount",
@@ -2807,14 +2889,28 @@ if current_step == 5:
     st.session_state["persist_spouse_net_income"] = spouse_net_income
     st.session_state["persist_spouse_amount_claim"] = spouse_amount_claim
     st.session_state["persist_eligible_dependant_claim_enabled"] = eligible_dependant_claim_enabled
+    st.session_state["persist_eligible_dependant_infirm"] = eligible_dependant_infirm
+    st.session_state["persist_dependant_lived_with_you"] = dependant_lived_with_you
     st.session_state["persist_eligible_dependant_net_income"] = eligible_dependant_net_income
     st.session_state["persist_eligible_dependant_claim"] = eligible_dependant_claim
+    st.session_state["persist_dependant_relationship"] = dependant_relationship
+    st.session_state["persist_dependant_category"] = dependant_category
+    st.session_state["persist_dependant_disability_transfer_available"] = dependant_disability_transfer_available
+    st.session_state["persist_dependant_disability_transfer_available_amount"] = dependant_disability_transfer_available_amount
+    st.session_state["persist_paid_child_support_for_dependant"] = paid_child_support_for_dependant
+    st.session_state["persist_shared_custody_claim_agreement"] = shared_custody_claim_agreement
+    st.session_state["persist_another_household_member_claims_dependant"] = another_household_member_claims_dependant
+    st.session_state["persist_another_household_member_claims_caregiver"] = another_household_member_claims_caregiver
+    st.session_state["persist_another_household_member_claims_disability_transfer"] = another_household_member_claims_disability_transfer
+    st.session_state["persist_medical_dependant_claim_shared"] = medical_dependant_claim_shared
+    st.session_state["persist_caregiver_claim_target"] = caregiver_claim_target
+    st.session_state["persist_disability_transfer_source"] = disability_transfer_source
     st.session_state["persist_cwb_basic_eligible"] = cwb_basic_eligible
     st.session_state["persist_cwb_disability_supplement_eligible"] = cwb_disability_supplement_eligible
     st.session_state["persist_spouse_cwb_disability_supplement_eligible"] = spouse_cwb_disability_supplement_eligible
     st.session_state["persist_canada_workers_benefit"] = canada_workers_benefit
-    with st.expander("Province-Specific Credits And Schedules", expanded=False):
-        st.caption("Open this only if you are adding province-specific claim amounts or special schedule inputs.")
+    with st.expander("Province-Specific Credits", expanded=False):
+        st.caption("Open this only if you need province-specific claims or schedule inputs.")
         on_col1, on_col2, on_col3 = st.columns(3)
         ontario_caregiver_amount = on_col1.number_input(
             f"{province_name} Caregiver Claim Amount",
@@ -2881,8 +2977,8 @@ if current_step == 5:
             )
         )
 
-    with st.expander("Foreign Tax And Dividend Credits", expanded=False):
-        st.caption("Open this only if you have extra foreign income, extra foreign tax paid, or are checking dividend-credit differences.")
+    with st.expander("Foreign Tax and Dividend Credits", expanded=False):
+        st.caption("Open this only if you have foreign income, foreign tax, or dividend-credit differences.")
         fd_col1, fd_col2 = st.columns(2)
         foreign_income = fd_col1.number_input(
             "Manual Additional Foreign Income Not Already On Slips",
@@ -2908,19 +3004,10 @@ if current_step == 5:
             key="provincial_dividend_tax_credit_manual",
             help=f"Leave at 0 to use the auto-calculated {province_name} dividend tax credit where supported. Enter a higher amount only if your worksheet shows a different result.",
         )
-        foreign_income += (
-            float(t5_wizard_totals.get("box15_foreign_income", 0.0))
-            + float(t3_wizard_totals.get("box25_foreign_income", 0.0))
-            + float(t4ps_wizard_totals.get("box37_foreign_non_business_income", 0.0))
-        )
-        foreign_tax_paid += (
-            float(t5_wizard_totals.get("box16_foreign_tax_paid", 0.0))
-            + float(t3_wizard_totals.get("box34_foreign_tax_paid", 0.0))
-        )
         st.caption("Slip amounts from T5, T3, and T4PS are already added automatically. Only enter extra amounts missing from slips.")
 
-        with st.expander("Advanced Foreign Tax Manual Amounts", expanded=False):
-            st.caption("Leave all manual amounts at 0 unless you are checking the T2209 or T2036 worksheet manually.")
+        with st.expander("Advanced Foreign Tax Amounts", expanded=False):
+            st.caption("Open this only if you are checking T2209 or T2036 manually.")
             ftc_col1, ftc_col2, ftc_col3 = st.columns(3)
             t2209_non_business_tax_paid = ftc_col1.number_input(
                 "T2209 Line 1 Non-Business Tax Paid Manual Amount",
@@ -2963,8 +3050,8 @@ if current_step == 5:
                 help="Optional override for the T2036 provincial tax otherwise payable amount.",
             )
 
-    with st.expander("Detailed Donation Worksheet Inputs (Less Common)", expanded=False):
-        st.caption("Open this only if you need Schedule 9 detail beyond the regular donation amount above.")
+    with st.expander("Detailed Donation Inputs", expanded=False):
+        st.caption("Open this only if you need extra Schedule 9 donation detail.")
         don_col1, don_col2, don_col3 = st.columns(3)
         donations_eligible_total = number_input(
             "Schedule 9 Regular Donations",
@@ -2983,8 +3070,8 @@ if current_step == 5:
             100.0,
         )
 
-    with st.expander("Carryforwards And Transfers", expanded=False):
-        st.caption("Open this only if you are bringing forward older tuition, donation, or provincial credit amounts.")
+    with st.expander("Carryforwards and Transfers", expanded=False):
+        st.caption("Open this only if you are carrying forward older amounts or transfers.")
         carryforward_tabs = st.tabs(["Tuition Carryforward", "Donation Carryforward", f"{province_name} Credit Lines"])
         with carryforward_tabs[0]:
             tuition_cf_df = render_record_card_editor(
@@ -3019,7 +3106,7 @@ if current_step == 5:
                 "Use this for province-specific credit lines not otherwise modelled. Amounts are added to provincial non-refundable credits.",
             )
         st.markdown("#### Province Special Schedules")
-        st.caption("Open this only if you need special province worksheet inputs that are not already covered above.")
+        st.caption("Open this only if you need extra province worksheet inputs.")
         sp_col1, sp_col2, sp_col3 = st.columns(3)
     mb479_personal_tax_credit = 0.0
     mb479_homeowners_affordability_credit = 0.0
@@ -3136,6 +3223,9 @@ if current_step == 5:
         nl_venture_capital_credit = number_input("NL428 Venture Capital Credit", "nl_venture_capital_credit", 50.0)
         nl_unused_venture_capital_credit = number_input("NL428 Unused Venture Capital Credit", "nl_unused_venture_capital_credit", 50.0)
         nl479_other_refundable_credits = number_input("NL479 Other Refundable Credits", "nl479_other_refundable_credits", 50.0)
+    st.session_state["persist_bc_renters_credit_eligible"] = bc_renters_credit_eligible
+    st.session_state["persist_bc_home_renovation_eligible"] = bc_home_renovation_eligible
+    st.session_state["persist_pe_volunteer_credit_eligible"] = pe_volunteer_credit_eligible
 tuition_cf_df = coerce_editor_df(tuition_cf_df, ["tax_year", "available_amount", "claim_amount"])
 donation_cf_df = coerce_editor_df(donation_cf_df, ["tax_year", "available_amount", "claim_amount"])
 provincial_credit_lines_df = coerce_editor_df(provincial_credit_lines_df, ["line_code", "amount"])
@@ -3151,11 +3241,11 @@ provincial_credit_lines_total = float(provincial_credit_lines_df["amount"].sum()
 if current_step == 5:
     nav_col1, nav_col2 = st.columns([1, 1])
     with nav_col1:
-        if st.button("Back: Deductions", key="back_step_5", use_container_width=True):
+        if st.button("Back", key="back_step_5", use_container_width=True):
             st.session_state["current_flow_step"] = 4
             st.rerun()
     with nav_col2:
-        if st.button("Next: Payments and Withholdings", key="next_step_5", use_container_width=True):
+        if st.button("Next", key="next_step_5", use_container_width=True):
             st.session_state["current_flow_step"] = 6
             st.rerun()
 schedule11_current_year_tuition_available = t2202_tuition_total
@@ -3178,22 +3268,24 @@ schedule9_total_regular_donations_unused = schedule9_current_year_donations_avai
 if current_step == 6:
     st.markdown("### 6) Payments and Withholdings")
     st.caption("You can skip this section unless you made instalments, had extra tax deducted outside slips, or need to add other payments not already captured from your slips.")
-    pay_col1, pay_col2, pay_col3 = st.columns(3)
-    income_tax_withheld = number_input("Other Income Tax Deducted at Source (line 43700)", "income_tax_withheld", 100.0)
-    cpp_withheld = number_input(
-        "CPP Withheld on Slips",
-        "cpp_withheld",
-        100.0,
-        "Optional override reference only. The estimator still calculates CPP from income sources.",
-    )
-    ei_withheld = number_input(
-        "EI Withheld on Slips",
-        "ei_withheld",
-        100.0,
-        "Optional override reference only. The estimator still calculates EI from employment income.",
-    )
-    installments_paid = number_input("Tax Instalments Paid (line 47600)", "installments_paid", 100.0)
-    other_payments = number_input("Other Tax Payments / Credits", "other_payments", 100.0)
+    with st.expander("Additional Payments and Withholding", expanded=False):
+        st.caption("Open this only if you made instalments or have extra payments or withholding.")
+        pay_col1, pay_col2, pay_col3 = st.columns(3)
+        income_tax_withheld = number_input("Other Income Tax Deducted at Source (line 43700)", "income_tax_withheld", 100.0)
+        cpp_withheld = number_input(
+            "CPP Withheld on Slips",
+            "cpp_withheld",
+            100.0,
+            "Optional override reference only. The estimator still calculates CPP from income sources.",
+        )
+        ei_withheld = number_input(
+            "EI Withheld on Slips",
+            "ei_withheld",
+            100.0,
+            "Optional override reference only. The estimator still calculates EI from employment income.",
+        )
+        installments_paid = number_input("Tax Instalments Paid (line 47600)", "installments_paid", 100.0)
+        other_payments = number_input("Other Tax Payments / Credits", "other_payments", 100.0)
     income_tax_withheld_total = (
         income_tax_withheld
         + float(t4_wizard_totals.get("box22_tax_withheld", 0.0))
@@ -3211,11 +3303,11 @@ if current_step == 6:
     )
     nav_col1, nav_col2 = st.columns([1, 1])
     with nav_col1:
-        if st.button("Back: Credits, Carryforwards, and Special Cases", key="back_step_6", use_container_width=True):
+        if st.button("Back", key="back_step_6", use_container_width=True):
             st.session_state["current_flow_step"] = 5
             st.rerun()
     with nav_col2:
-        if st.button("Next: Pre-Calculation Diagnostics", key="next_step_6", use_container_width=True):
+        if st.button("Next", key="next_step_6", use_container_width=True):
             st.session_state["current_flow_step"] = 7
             st.rerun()
 
@@ -3496,7 +3588,9 @@ if current_step == 7:
     warning_count = sum(1 for severity, _, _ in diagnostics if severity == "Warning")
     info_count = sum(1 for severity, _, _ in diagnostics if severity == "Info")
     with st.container(border=True):
-        st.markdown("##### Before You Calculate")
+        st.markdown("##### Final Checkpoint")
+        st.caption("Confirm the main inputs below, then check whether any diagnostic items still need attention.")
+        st.markdown("###### Input Snapshot")
         current_input_summary = [
             ("Employment Income", employment_income),
             ("Investment / Other Income", other_income + interest_income + taxable_capital_gains + t5_eligible_dividends_taxable + t5_non_eligible_dividends_taxable + t3_eligible_dividends_taxable + t3_non_eligible_dividends_taxable),
@@ -3520,38 +3614,29 @@ if current_step == 7:
             household_refundable_flags.append(f"CWB active (preview: {format_currency(wizard_cwb_preview_credit)})")
         if household_refundable_flags:
             st.caption("Household / refundable summary: " + " | ".join(household_refundable_flags))
+        st.divider()
+        st.markdown("###### Diagnostic Status")
+        render_metric_row(
+            [
+                ("High-Risk", float(high_risk_count)),
+                ("Warnings", float(warning_count)),
+                ("Info", float(info_count)),
+            ],
+            3,
+            formatter=format_plain_number,
+        )
         if diagnostics:
-            st.divider()
-            st.markdown("##### Diagnostic Details")
             if high_risk_count > 0:
                 st.warning("High-risk items are still showing. It is worth checking those before you calculate.")
             elif warning_count > 0:
                 st.info("Only review-level items are showing. You can still calculate now, then come back if needed.")
             else:
                 st.success("No major pre-calculation issues are standing out. You can calculate the return when ready.")
-            render_metric_row(
-                [
-                    ("High-Risk", float(high_risk_count)),
-                    ("Warnings", float(warning_count)),
-                    ("Info", float(info_count)),
-                ],
-                3,
-                formatter=format_plain_number,
-            )
+            st.markdown("###### Diagnostic Details")
             render_diagnostics_panel(diagnostics, formatter=format_plain_number, show_counts=False)
         else:
-            st.divider()
-            st.markdown("##### Diagnostic Details")
             st.success("No major pre-calculation issues are standing out. You can calculate the return when ready.")
-            render_metric_row(
-                [
-                    ("High-Risk", float(high_risk_count)),
-                    ("Warnings", float(warning_count)),
-                    ("Info", float(info_count)),
-                ],
-                3,
-                formatter=format_plain_number,
-            )
+            st.markdown("###### Diagnostic Details")
             st.caption("No obvious duplication or consistency issues were detected from the current inputs.")
 
     action_col1, action_col2, action_col3 = st.columns([1.2, 0.7, 4.1])
@@ -3561,7 +3646,7 @@ if current_step == 7:
         reset_clicked = st.button("Reset", use_container_width=True)
     back_col1, back_col2 = st.columns([1, 1])
     with back_col1:
-        if st.button("Back: Payments and Withholdings", key="back_step_7", use_container_width=True):
+        if st.button("Back", key="back_step_7", use_container_width=True):
             st.session_state["current_flow_step"] = 6
             st.rerun()
 
@@ -3821,21 +3906,21 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             "tax_year": tax_year,
             "province": province,
             "age": age,
-            "spouse_claim_enabled": st.session_state.get("spouse_claim_enabled", False),
-            "has_spouse_end_of_year": st.session_state.get("has_spouse_end_of_year", False),
-            "separated_in_year": st.session_state.get("separated_in_year", False),
-            "support_payments_to_spouse": st.session_state.get("support_payments_to_spouse", False),
-            "spouse_infirm": st.session_state.get("spouse_infirm", False),
-            "eligible_dependant_claim_enabled": st.session_state.get("eligible_dependant_claim_enabled", False),
-            "dependant_lived_with_you": st.session_state.get("dependant_lived_with_you", False),
-            "dependant_relationship": st.session_state.get("dependant_relationship", ""),
-            "dependant_category": st.session_state.get("dependant_category", ""),
-            "paid_child_support_for_dependant": st.session_state.get("paid_child_support_for_dependant", False),
-            "shared_custody_claim_agreement": st.session_state.get("shared_custody_claim_agreement", False),
-            "another_household_member_claims_dependant": st.session_state.get("another_household_member_claims_dependant", False),
-            "cwb_basic_eligible": st.session_state.get("cwb_basic_eligible", False),
-            "cwb_disability_supplement_eligible": st.session_state.get("cwb_disability_supplement_eligible", False),
-            "spouse_cwb_disability_supplement_eligible": st.session_state.get("spouse_cwb_disability_supplement_eligible", False),
+            "spouse_claim_enabled": wizard_spouse_claim_enabled,
+            "has_spouse_end_of_year": wizard_has_spouse_end_of_year,
+            "separated_in_year": wizard_separated_in_year,
+            "support_payments_to_spouse": wizard_support_payments_to_spouse,
+            "spouse_infirm": wizard_spouse_infirm,
+            "eligible_dependant_claim_enabled": wizard_eligible_dependant_claim_enabled,
+            "dependant_lived_with_you": dependant_lived_with_you,
+            "dependant_relationship": dependant_relationship,
+            "dependant_category": dependant_category,
+            "paid_child_support_for_dependant": paid_child_support_for_dependant,
+            "shared_custody_claim_agreement": shared_custody_claim_agreement,
+            "another_household_member_claims_dependant": another_household_member_claims_dependant,
+            "cwb_basic_eligible": wizard_cwb_basic_eligible,
+            "cwb_disability_supplement_eligible": wizard_cwb_disability_supplement_eligible,
+            "spouse_cwb_disability_supplement_eligible": wizard_spouse_cwb_disability_supplement_eligible,
             "medical_expenses_paid": st.session_state.get("medical_expenses_paid", 0.0),
             "charitable_donations": st.session_state.get("charitable_donations", 0.0),
             "donations_eligible_total": st.session_state.get("donations_eligible_total", 0.0),
@@ -3857,15 +3942,15 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             "canada_training_credit_limit_available": st.session_state.get("canada_training_credit_limit_available", 0.0),
             "bc_renters_credit_eligible": st.session_state.get("bc_renters_credit_eligible", False),
             "t776_property_taxes": st.session_state.get("t776_property_taxes", 0.0),
-            "canada_workers_benefit": st.session_state.get("canada_workers_benefit", 0.0),
+            "canada_workers_benefit": wizard_canada_workers_benefit,
             "canada_training_credit": st.session_state.get("canada_training_credit", 0.0),
             "medical_expense_supplement": st.session_state.get("medical_expense_supplement", 0.0),
             "other_federal_refundable_credits": st.session_state.get("other_federal_refundable_credits", 0.0),
             "manual_provincial_refundable_credits": st.session_state.get("manual_provincial_refundable_credits", 0.0),
             "refundable_credits": st.session_state.get("refundable_credits", 0.0),
-            "spouse_amount_claim": st.session_state.get("spouse_amount_claim", 0.0),
-            "eligible_dependant_claim": st.session_state.get("eligible_dependant_claim", 0.0),
-            "spouse_net_income": st.session_state.get("spouse_net_income", 0.0),
+            "spouse_amount_claim": wizard_spouse_amount_claim,
+            "eligible_dependant_claim": wizard_eligible_dependant_claim,
+            "spouse_net_income": wizard_spouse_net_income,
             "income_tax_withheld": st.session_state.get("income_tax_withheld", 0.0),
             "cpp_withheld": st.session_state.get("cpp_withheld", 0.0),
             "ei_withheld": st.session_state.get("ei_withheld", 0.0),

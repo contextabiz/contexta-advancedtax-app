@@ -97,9 +97,6 @@ def build_completion_flags(
             "Step 5 -> Common Credits And Claim Amounts",
             "tuition_and_student",
         )
-    if "training_credit_limit_zero" in eligibility_decision["review_flags"]:
-        rule = rule_result_by_id["training_credit_limit_zero"]
-        add("training_credit_limit_zero", "review", rule["message"], rule["where"], "tuition_and_student")
     if (screening["had_medical_expenses"] or screening["made_donations"]) and progress["section_4_credits"] == "not_started":
         add(
             "common_credits_not_reviewed",

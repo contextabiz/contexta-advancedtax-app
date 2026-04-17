@@ -73,7 +73,7 @@ def build_eligibility_guidance(
     if (
         (screening["paid_tuition"] or screening["paid_student_loan_interest"])
         and "tuition_no_available_amount" not in rule_ids
-    ) or "training_credit_limit_zero" in rule_ids:
+    ):
         add_item({
             "id": "tuition_and_student",
             "priority": "likely",
@@ -128,8 +128,8 @@ def build_eligibility_guidance(
             "confidence": "medium",
         })
     if (
-        screening["low_income_self_assessed"] or "cwb_not_enabled" in rule_ids
-    ) and (progress is None or progress.get("refundable_reviewed") != "done" or "cwb_not_enabled" in rule_ids):
+        screening["low_income_self_assessed"] or "cwb_not_enabled" in rule_ids or "cwb_enabled" in rule_ids
+    ) and (progress is None or progress.get("refundable_reviewed") != "done" or "cwb_not_enabled" in rule_ids or "cwb_enabled" in rule_ids):
         if "cwb_enabled" not in rule_ids:
             add_item({
                 "id": "low_income_refundable",
