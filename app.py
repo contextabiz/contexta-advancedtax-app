@@ -328,14 +328,63 @@ def inject_meta_tags():
 
 
 def number_input(label: str, key: str, step: float = 100.0, help_text: str | None = None) -> float:
-    return st.number_input(
+    value = float(
+        st.number_input(
         label,
         min_value=0.0,
         step=step,
-        value=float(st.session_state.get(key, 0.0)),
+        value=float(st.session_state.get(key, st.session_state.get(f"persist_{key}", 0.0))),
         key=key,
         help=help_text,
+        )
     )
+    st.session_state[f"persist_{key}"] = value
+    return value
+
+
+def checkbox_input(
+    label: str,
+    key: str,
+    value: bool = False,
+    help_text: str | None = None,
+    container=None,
+) -> bool:
+    target = container or st
+    checked = bool(
+        target.checkbox(
+            label,
+            value=bool(st.session_state.get(key, st.session_state.get(f"persist_{key}", value))),
+            key=key,
+            help=help_text,
+        )
+    )
+    st.session_state[f"persist_{key}"] = checked
+    return checked
+
+
+def selectbox_input(
+    label: str,
+    options: list[str],
+    key: str,
+    default_value: str,
+    help_text: str | None = None,
+    container=None,
+) -> str:
+    target = container or st
+    selected_value = str(st.session_state.get(key, st.session_state.get(f"persist_{key}", default_value)))
+    if selected_value not in options:
+        selected_value = default_value
+    selected = str(
+        target.selectbox(
+            label,
+            options,
+            index=options.index(selected_value),
+            key=key,
+            help=help_text,
+        )
+    )
+    st.session_state[f"persist_{key}"] = selected
+    return selected
 
 
 def format_currency(value: float) -> str:
@@ -702,6 +751,452 @@ def format_plain_number(value: float) -> str:
     return f"{int(value)}" if float(value).is_integer() else f"{value:.2f}"
 
 
+PLANNING_PRIORITY_THRESHOLDS = {
+    "high_balance_owing": 1500.0,
+    "spouse_low_income_upper": 16000.0,
+    "material_tuition_room": 1000.0,
+    "light_deduction_usage": 5000.0,
+}
+
+
+def build_planning_priority_context(
+    result: dict,
+    inside_items: list[dict],
+    refund_amount: float,
+    balance_owing_amount: float,
+) -> dict[str, float | bool | set[str]]:
+    inside_ids = {str(item.get("id", "")) for item in inside_items}
+    spouse_claim_used = float(result.get("line_30300", 0.0))
+    spouse_net_income_for_review = float(result.get("spouse_net_income_for_lift", 0.0))
+    tuition_available_total = float(result.get("schedule11_total_available", 0.0))
+    tuition_claim_used_total = float(result.get("schedule11_total_claim_used", 0.0))
+    total_deductions_used = float(result.get("total_deductions", 0.0))
+    tuition_unused_total = max(0.0, tuition_available_total - tuition_claim_used_total)
+
+    has_spouse_signal = "spouse_amount" in inside_ids or spouse_claim_used > 0
+    has_household_signal = (
+        "household_dependants" in inside_ids
+        or result.get("line_30400", 0.0) > 0
+        or result.get("caregiver_amount_claim", 0.0) > 0
+    )
+    has_tuition_signal = "tuition_and_student" in inside_ids or tuition_claim_used_total > 0
+    has_low_income_signal = (
+        "low_income_refundable" in inside_ids
+        or result.get("canada_workers_benefit", 0.0) > 0
+        or result.get("medical_expense_supplement", 0.0) > 0
+    )
+    has_deduction_signal = "deductions_review" in inside_ids or total_deductions_used > 0
+    has_medical_donation_signal = (
+        "medical_and_donations" in inside_ids
+        or result.get("schedule9_total_regular_donations_claimed", 0.0) > 0
+        or result.get("federal_donation_credit", 0.0) > 0
+    )
+    has_foreign_signal = (
+        "foreign_and_investment" in inside_ids
+        or result.get("federal_foreign_tax_credit", 0.0) + result.get("provincial_foreign_tax_credit", 0.0) > 0
+    )
+
+    return {
+        "inside_ids": inside_ids,
+        "refund_amount": refund_amount,
+        "balance_owing_amount": balance_owing_amount,
+        "has_spouse_signal": has_spouse_signal,
+        "has_household_signal": has_household_signal,
+        "has_tuition_signal": has_tuition_signal,
+        "has_low_income_signal": has_low_income_signal,
+        "has_deduction_signal": has_deduction_signal,
+        "has_medical_donation_signal": has_medical_donation_signal,
+        "has_foreign_signal": has_foreign_signal,
+        "spouse_claim_used": spouse_claim_used,
+        "spouse_net_income_for_review": spouse_net_income_for_review,
+        "tuition_available_total": tuition_available_total,
+        "tuition_claim_used_total": tuition_claim_used_total,
+        "tuition_unused_total": tuition_unused_total,
+        "total_deductions_used": total_deductions_used,
+        "high_balance_owing": balance_owing_amount >= PLANNING_PRIORITY_THRESHOLDS["high_balance_owing"],
+        "spouse_amount_not_used_but_may_be_available": (
+            has_spouse_signal
+            and spouse_claim_used <= 0.0
+            and spouse_net_income_for_review > 0.0
+            and spouse_net_income_for_review < PLANNING_PRIORITY_THRESHOLDS["spouse_low_income_upper"]
+        ),
+        "material_tuition_room_remaining": (
+            has_tuition_signal and tuition_unused_total >= PLANNING_PRIORITY_THRESHOLDS["material_tuition_room"]
+        ),
+    }
+
+
+def planning_priority(
+    base: int,
+    context: dict[str, float | bool | set[str]],
+    *,
+    spouse: bool = False,
+    household: bool = False,
+    tuition: bool = False,
+    low_income: bool = False,
+    deduction: bool = False,
+    medical_donation: bool = False,
+    foreign: bool = False,
+) -> int:
+    priority = base
+    balance_owing_amount = float(context["balance_owing_amount"])
+    refund_amount = float(context["refund_amount"])
+    high_balance_owing = bool(context["high_balance_owing"])
+
+    if balance_owing_amount > 0:
+        if deduction:
+            priority -= 8
+        if spouse or household or tuition or medical_donation or low_income:
+            priority -= 5
+    if high_balance_owing:
+        if deduction:
+            priority -= 10
+        if spouse or household or tuition or medical_donation:
+            priority -= 6
+    if refund_amount > 0:
+        if spouse or household or tuition:
+            priority -= 3
+        if foreign:
+            priority += 4
+    if spouse and bool(context["has_spouse_signal"]):
+        priority -= 10
+    if spouse and bool(context["spouse_amount_not_used_but_may_be_available"]):
+        priority -= 12
+    if household and bool(context["has_household_signal"]):
+        priority -= 6
+    if tuition and bool(context["has_tuition_signal"]):
+        priority -= 8
+    if tuition and bool(context["material_tuition_room_remaining"]):
+        priority -= 12
+    if low_income and bool(context["has_low_income_signal"]):
+        priority -= 7
+    if deduction and bool(context["has_deduction_signal"]):
+        priority -= 6
+    if deduction and high_balance_owing and float(context["total_deductions_used"]) < PLANNING_PRIORITY_THRESHOLDS["light_deduction_usage"]:
+        priority -= 6
+    if medical_donation and bool(context["has_medical_donation_signal"]):
+        priority -= 4
+    if foreign and bool(context["has_foreign_signal"]):
+        priority -= 2
+    return priority
+
+
+def build_advisor_summary_sections(
+    result: dict,
+    readiness_df: pd.DataFrame,
+    suggestions: "list[SuggestionItem] | None" = None,
+) -> list[tuple[str, list[str]]]:
+    suggestions = suggestions or []
+    refund_amount = float(result.get("line_48400_refund", 0.0))
+    balance_owing_amount = float(result.get("line_48500_balance_owing", 0.0))
+    inside_items = [
+        item for item in suggestions
+        if "outside this estimator" not in item["where"].lower()
+    ]
+    outside_items = [
+        item for item in suggestions
+        if "outside this estimator" in item["where"].lower()
+    ]
+
+    ranked_opportunities: list[tuple[int, str, bool, frozenset[str]]] = []
+    estimate_changers: list[str] = []
+    verify_items: list[str] = []
+    planning_context = build_planning_priority_context(
+        result=result,
+        inside_items=inside_items,
+        refund_amount=refund_amount,
+        balance_owing_amount=balance_owing_amount,
+    )
+    inside_ids = planning_context["inside_ids"]
+    claim_specific_opportunity_ids: set[str] = set()
+
+    def infer_topics(text: str) -> frozenset[str]:
+        lowered = text.lower()
+        topics: set[str] = set()
+        if any(token in lowered for token in ["spouse", "common-law"]):
+            topics.add("spouse")
+        if any(token in lowered for token in ["dependant", "caregiver", "disability transfer", "medical claim"]):
+            topics.add("household")
+        if any(token in lowered for token in ["tuition", "student loan", "carryforward"]):
+            topics.add("tuition")
+        if any(token in lowered for token in ["medical expenses", "charitable donations", "donation"]):
+            topics.add("medical_donation")
+        if any(token in lowered for token in ["rrsp", "fhsa", "moving expenses", "child care", "support payments", "work-related deductions", "deductions"]):
+            topics.add("deduction")
+        if any(token in lowered for token in ["foreign income", "dividend", "foreign tax"]):
+            topics.add("foreign")
+        if any(token in lowered for token in ["canada workers benefit", "medical expense supplement", "lower-income"]):
+            topics.add("low_income")
+        if not topics:
+            topics.add("generic")
+        return frozenset(topics)
+
+    def add_opportunity(priority: int, text: str, *, generic: bool = False) -> None:
+        ranked_opportunities.append((priority, text, generic, infer_topics(text)))
+
+    # Prefer claim-level planning notes over generic review language.
+    if any(item.get("id") == "spouse_amount" for item in inside_items):
+        claim_specific_opportunity_ids.add("spouse_amount")
+        add_opportunity(
+            planning_priority(18, planning_context, spouse=True),
+            "A spouse or common-law partner amount may still be worth reviewing on this file if your spouse or partner had low net income at year end. Review Step 5 -> Household And Dependants to confirm whether that claim position is available."
+        )
+    if any(item.get("id") == "household_dependants" for item in inside_items):
+        claim_specific_opportunity_ids.add("household_dependants")
+        add_opportunity(
+            planning_priority(24, planning_context, household=True),
+            "An eligible dependant, caregiver, disability transfer, or dependant-medical claim may still be available based on the household facts entered so far. Review Step 5 -> Household And Dependants to confirm which household claim is supportable."
+        )
+    if any(item.get("id") == "medical_and_donations" for item in inside_items):
+        claim_specific_opportunity_ids.add("medical_and_donations")
+        add_opportunity(
+            planning_priority(34, planning_context, medical_donation=True),
+            "Medical expenses or charitable donations may still create additional non-refundable credits on this return. Review Step 5 -> Common Credits And Claim Amounts to confirm whether all available amounts have been included."
+        )
+    if any(item.get("id") == "deductions_review" for item in inside_items):
+        claim_specific_opportunity_ids.add("deductions_review")
+        add_opportunity(
+            planning_priority(16, planning_context, deduction=True),
+            "RRSP, FHSA, moving expenses, child care, support payments, or work-related deductions may still improve the result if they have not yet been worked through in full. Review Step 4 -> Deductions."
+        )
+    if any(item.get("id") == "foreign_and_investment" for item in inside_items):
+        claim_specific_opportunity_ids.add("foreign_and_investment")
+        add_opportunity(
+            planning_priority(50, planning_context, foreign=True),
+            "Foreign income, dividend details, or foreign tax credits may still change the outcome if the income classification or supporting tax paid amounts have not yet been fully matched. Review Step 3 -> Income And Investment and Step 5 -> Foreign Tax And Dividend Credits."
+        )
+    if any(item.get("id") == "low_income_refundable" for item in inside_items):
+        claim_specific_opportunity_ids.add("low_income_refundable")
+        add_opportunity(
+            planning_priority(38, planning_context, low_income=True),
+            "Canada Workers Benefit, the disability supplement path, or the Medical Expense Supplement may still be worth checking if this is a lower-income return. Review Step 5 -> Refundable Credits."
+        )
+
+    for item in inside_items:
+        item_id = str(item.get("id", ""))
+        if item_id in claim_specific_opportunity_ids:
+            continue
+        review_line = (
+            f"On the facts entered so far, {item['label'].rstrip('.').lower()} may still warrant a closer review. "
+            f"Review {item['where']} to confirm whether any further claim, adjustment, or supporting amount is still available."
+        )
+        if len(ranked_opportunities) < 7:
+            add_opportunity(planning_priority(90, planning_context), review_line, generic=True)
+        if any(
+            token in f"{item['label']} {item['reason']}".lower()
+            for token in ["foreign", "dividend", "tuition", "carryforward", "household", "spouse", "dependant", "deduction", "credit"]
+        ) and len(estimate_changers) < 3:
+            estimate_changers.append(
+                f"For this return, {item['label'].rstrip('.').lower()} remains a higher-impact review area. {item['reason']}"
+            )
+
+    if result.get("federal_foreign_tax_credit", 0.0) + result.get("provincial_foreign_tax_credit", 0.0) > 0:
+        estimate_changers.append(
+            "Foreign tax credits are being claimed in the current estimate, so source classification, supporting slips, and the T2209/T2036 ceiling calculations could materially change the final filing position."
+        )
+    if result.get("schedule11_total_claim_used", 0.0) > 0:
+        estimate_changers.append(
+            "Tuition is active in this return, so available balances, transfer positioning, and carryforward treatment could move the final refund or balance owing."
+        )
+    if result.get("schedule9_total_regular_donations_claimed", 0.0) > 0:
+        estimate_changers.append(
+            "Donation claims are being used in this estimate, so receipt support, carryforward availability, and the applicable net-income limits are worth confirming before filing."
+        )
+    if result.get("line_30300", 0.0) > 0 or result.get("line_30400", 0.0) > 0 or result.get("caregiver_amount_claim", 0.0) > 0:
+        estimate_changers.append(
+            "Household-related claims appear relevant on this file, and facts such as support, custody, living arrangements, and dependant net income can change which claim position is supportable."
+        )
+    if result.get("income_tax_withheld", 0.0) > 0 and balance_owing_amount > 0:
+        estimate_changers.append(
+            "The return is still showing a balance owing even with withholding entered, which usually means income mix, credits, or support details could still affect the final payable materially."
+        )
+    if result.get("income_tax_withheld", 0.0) > 0 and refund_amount > 0:
+        estimate_changers.append(
+            "The current refund appears to be driven in part by withholding already on file, so any change to deductions, credits, or support would likely change the refund amount rather than the overall direction of the result."
+        )
+
+    if not readiness_df.empty:
+        missing_rows = readiness_df[readiness_df["Status"].astype(str) == "Missing"]
+        review_rows = readiness_df[readiness_df["Status"].astype(str) == "Review"]
+        for _, row in missing_rows.head(2).iterrows():
+            verify_items.append(
+                f"Pre-filing support still appears incomplete for {row['Area']} - {row['Checklist Item']}. On this file, that item should be confirmed before the estimate is treated as a reliable filing position."
+            )
+        for _, row in review_rows.head(2).iterrows():
+            verify_items.append(
+                f"Further review is still warranted for {row['Area']} - {row['Checklist Item']}, as it may still affect the filing position, supportability of the claim, or final numbers."
+            )
+
+    for item in outside_items[:2]:
+        verify_items.append(
+            f"A separate tax review item still sits outside this estimator: {item['label']} {item['reason']}"
+        )
+
+    def dedupe_keep_order(items: list[str], limit: int = 3) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for entry in items:
+            key = entry.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ordered.append(entry)
+            if len(ordered) >= limit:
+                break
+        return ordered
+
+    estimate_changers = dedupe_keep_order(estimate_changers)
+    verify_items = dedupe_keep_order(verify_items)
+
+    sensitivity_topics: set[str] = set()
+    for line in estimate_changers:
+        sensitivity_topics.update(infer_topics(line))
+
+    ranked_opportunities.sort(key=lambda item: item[0])
+    selected_opportunities: list[str] = []
+    selected_topic_sets: list[frozenset[str]] = []
+    generic_count = 0
+
+    non_generic_candidates = [item for item in ranked_opportunities if not item[2]]
+    if non_generic_candidates:
+        first_priority, first_text, first_is_generic, first_topics = non_generic_candidates[0]
+        selected_opportunities.append(first_text)
+        selected_topic_sets.append(first_topics)
+        if first_is_generic:
+            generic_count += 1
+
+    for priority, text, is_generic, topics in ranked_opportunities:
+        if text in selected_opportunities:
+            continue
+        if len(selected_opportunities) >= 3:
+            break
+        if is_generic and generic_count >= 1:
+            continue
+        if topics & sensitivity_topics:
+            continue
+        if any(topics & existing for existing in selected_topic_sets):
+            continue
+        selected_opportunities.append(text)
+        selected_topic_sets.append(topics)
+        if is_generic:
+            generic_count += 1
+
+    for priority, text, is_generic, topics in ranked_opportunities:
+        if text in selected_opportunities:
+            continue
+        if len(selected_opportunities) >= 3:
+            break
+        if is_generic and generic_count >= 1:
+            continue
+        if any(topics & existing for existing in selected_topic_sets):
+            continue
+        selected_opportunities.append(text)
+        selected_topic_sets.append(topics)
+        if is_generic:
+            generic_count += 1
+
+    opportunities = dedupe_keep_order(selected_opportunities, limit=3)
+
+    if not opportunities:
+        opportunities = [
+            "Based on the current inputs, there may still be tax-saving items worth reviewing if deductions, common credits, or household claims have not yet been worked through in full."
+        ]
+    if not estimate_changers:
+        estimate_changers = [
+            "Based on the current inputs, withholding, deduction support, credit eligibility, and carryforward treatment remain the most likely items to move the final refund or balance owing."
+        ]
+    if not verify_items:
+        verify_items = [
+            "Before relying on this estimate, confirm slip totals, major deduction support, and any credit or carryforward amounts that affect the filing position."
+        ]
+
+    return [
+        ("Planning", opportunities),
+        ("Sensitivity", estimate_changers),
+        ("Verification", verify_items),
+    ]
+
+
+def build_advisor_summary_lead(result: dict) -> str:
+    refund_amount = float(result.get("line_48400_refund", 0.0))
+    balance_owing_amount = float(result.get("line_48500_balance_owing", 0.0))
+    deductions = float(result.get("total_deductions", 0.0))
+    refundable_credits = float(result.get("refundable_credits", 0.0))
+    withholding = float(result.get("income_tax_withheld", 0.0))
+
+    if refund_amount > 0:
+        outcome = f"Based on the current inputs, the file is showing an estimated refund of {format_currency(refund_amount)}."
+    elif balance_owing_amount > 0:
+        outcome = f"Based on the current inputs, the file is showing an estimated balance owing of {format_currency(balance_owing_amount)}."
+    else:
+        outcome = "Based on the current inputs, the file is currently close to break-even."
+
+    drivers: list[str] = []
+    if withholding > 0:
+        drivers.append("withholding already entered")
+    if deductions > 0:
+        drivers.append("deductions currently claimed")
+    if refundable_credits > 0:
+        drivers.append("refundable credits in the estimate")
+
+    if drivers:
+        driver_text = ", ".join(drivers[:-1]) + (f", and {drivers[-1]}" if len(drivers) > 1 else drivers[0])
+        return (
+            f"{outcome} On a preparer-style review, the result looks directionally reasonable based on {driver_text}, "
+            "but the follow-up points below are still worth working through before the estimate is treated as a filing-position memo."
+        )
+    return (
+        f"{outcome} On a preparer-style review, the first follow-up is whether all available deductions, credits, and household positions have actually been worked through."
+    )
+
+
+def render_advisor_summary(
+    result: dict,
+    readiness_df: pd.DataFrame,
+    suggestions: "list[SuggestionItem] | None" = None,
+) -> None:
+    sections = build_advisor_summary_sections(result, readiness_df, suggestions)
+    lead_text = build_advisor_summary_lead(result)
+    shell_bg = "#0D1522"
+    lead_bg = "#121D2D"
+    card_bg = "#101826"
+    border = "rgba(255,255,255,0.08)"
+    title_color = "#FFFFFF"
+    body_color = "#D9E3F0"
+    label_color = "#8FA8C6"
+
+    with st.container(border=True):
+        st.markdown("##### Advisor Summary")
+        st.markdown(
+            (
+                f"<div style='background:{shell_bg};border:1px solid {border};border-radius:18px;"
+                f"padding:18px 20px;margin:4px 0 16px 0;'>"
+                f"<div style='font-size:0.78rem;letter-spacing:0.08em;text-transform:uppercase;color:{label_color};font-weight:700;margin-bottom:8px;'>Return Memo</div>"
+                f"<div style='color:{body_color};line-height:1.75;font-size:0.98rem;'>{lead_text}</div>"
+                f"</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+
+        columns = st.columns(3)
+        for column, (title, items) in zip(columns, sections):
+            with column:
+                bullet_html = "".join(
+                    f"<li style='margin:0 0 12px 0;'>{entry}</li>"
+                    for entry in items
+                )
+                st.markdown(
+                    (
+                        f"<div style='background:{card_bg};border:1px solid {border};border-radius:16px;"
+                        f"padding:16px 18px 18px 18px;min-height:250px;'>"
+                        f"<div style='font-size:0.76rem;letter-spacing:0.08em;text-transform:uppercase;color:{label_color};font-weight:700;margin-bottom:10px;'>{title}</div>"
+                        f"<ul style='margin:0;padding-left:18px;color:{body_color};line-height:1.7;'>{bullet_html}</ul>"
+                        f"</div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+
+
 def render_suggestion_cards(suggestions: "list[SuggestionItem]") -> None:
     if not suggestions:
         return
@@ -713,40 +1208,44 @@ def render_suggestion_cards(suggestions: "list[SuggestionItem]") -> None:
         combined = f"{label} {reason}".lower()
         if "outside this estimator" in where.lower():
             return (
-                "Not Included - Review Separately",
-                "Not Included - Review Separately",
+                "Outside This Estimator",
+                "Outside Scope",
                 "#8A5315",
                 "#181F2E",
             )
         if any(token in combined for token in ["already been included", "included in your current estimate", "active (preview"]):
             return (
-                "Included In Your Estimate",
-                "Included In Your Estimate",
+                "Already Reflected In This Estimate",
+                "Already Reflected",
                 "#1E8E53",
                 "#141C2C",
             )
         return (
-            "Review In This Estimator",
-            "Review In This Estimator",
+            "Potential Tax Review Opportunities",
+            "Review Opportunity",
             "#2E6FDC",
             "#141C2C",
         )
 
     grouped_items: dict[str, list[tuple[SuggestionItem, str, str, str]]] = {
-        "Included In Your Estimate": [],
-        "Review In This Estimator": [],
-        "Not Included - Review Separately": [],
+        "Already Reflected In This Estimate": [],
+        "Potential Tax Review Opportunities": [],
+        "Outside This Estimator": [],
     }
     for item in suggestions:
         group_label, pill_label, pill_color, card_bg = classify_suggestion(item)
         grouped_items[group_label].append((item, pill_label, pill_color, card_bg))
 
     with st.container(border=True):
-        st.markdown("##### Recommended Next Checks")
+        st.markdown("##### Tax Review Notes")
+        st.caption(
+            "These notes are meant to highlight areas that may still change the estimate, deserve a second look, "
+            "or should be reviewed outside this estimator before you rely on the result."
+        )
         for group_name in [
-            "Included In Your Estimate",
-            "Review In This Estimator",
-            "Not Included - Review Separately",
+            "Potential Tax Review Opportunities",
+            "Already Reflected In This Estimate",
+            "Outside This Estimator",
         ]:
             group_items = grouped_items[group_name]
             if not group_items:
@@ -763,8 +1262,8 @@ def render_suggestion_cards(suggestions: "list[SuggestionItem]") -> None:
                             f"background:{pill_color};color:white;font-weight:700;font-size:0.80rem;line-height:1.2;'>{pill_label}</span>"
                             f"<span style='font-weight:700;font-size:1.04rem;color:#FFFFFF;'>{item['label']}</span>"
                             f"</div>"
-                            f"<div style='margin:0 0 8px 0;color:#E8EDF7;line-height:1.6;'><strong>What this means:</strong> {item['reason']}</div>"
-                            f"<div style='margin:0;color:#E8EDF7;line-height:1.6;'><strong>Next step:</strong> {item['where']}</div>"
+                            f"<div style='margin:0 0 8px 0;color:#E8EDF7;line-height:1.6;'><strong>Why this may matter:</strong> {item['reason']}</div>"
+                            f"<div style='margin:0;color:#E8EDF7;line-height:1.6;'><strong>Where to review:</strong> {item['where']}</div>"
                             f"</div>"
                         ),
                         unsafe_allow_html=True,
@@ -807,7 +1306,7 @@ def render_answer_summary_sheet(
     )
     st.caption(f"Filing snapshot: Ready {ready_count}, Review {review_count}, Missing {missing_count}.")
     if suggestions:
-        render_suggestion_cards(suggestions)
+        render_advisor_summary(result, readiness_df, suggestions)
 
 
 def render_flow_stepper(current_step: int) -> None:
@@ -1403,12 +1902,20 @@ def render_record_card_editor(
     st.markdown(f"#### {title}")
     if help_text:
         st.caption(help_text)
+    current_records = st.session_state.get(card_key)
+    persisted_records = st.session_state.get(f"persist_{card_key}")
+    source_records = current_records if isinstance(current_records, list) else persisted_records if isinstance(persisted_records, list) else []
+    default_count = max(
+        int(st.session_state.get(f"{card_key}_count", 0)),
+        len(source_records),
+        count_default,
+    )
     count = int(
         st.number_input(
             f"Number of {title}",
             min_value=0,
             step=1,
-            value=int(st.session_state.get(f"{card_key}_count", count_default)),
+            value=default_count,
             key=f"{card_key}_count",
         )
     )
@@ -1423,17 +1930,18 @@ def render_record_card_editor(
                 field_id = str(field["id"])
                 field_type = str(field.get("type", "number"))
                 widget_key = f"{card_key}_{index}_{field_id}"
+                source_record = source_records[index] if index < len(source_records) else {}
                 if field_type == "text":
                     record[field_id] = col.text_input(
                         str(field["label"]),
-                        value=str(st.session_state.get(widget_key, field.get("value", ""))),
+                        value=str(st.session_state.get(widget_key, source_record.get(field_id, field.get("value", "")))),
                         key=widget_key,
                         help=str(field.get("help", "")) if field.get("help") else None,
                         placeholder=str(field.get("placeholder", "")) if field.get("placeholder") else None,
                     )
                 elif field_type == "select":
                     options = list(field.get("options", []))
-                    default_value = st.session_state.get(widget_key, field.get("value", options[0] if options else ""))
+                    default_value = st.session_state.get(widget_key, source_record.get(field_id, field.get("value", options[0] if options else "")))
                     default_index = options.index(default_value) if default_value in options else 0
                     record[field_id] = col.selectbox(
                         str(field["label"]),
@@ -1448,13 +1956,14 @@ def render_record_card_editor(
                             str(field["label"]),
                             min_value=0.0,
                             step=float(field.get("step", 100.0)),
-                            value=float(st.session_state.get(widget_key, field.get("value", 0.0))),
+                            value=float(st.session_state.get(widget_key, source_record.get(field_id, field.get("value", 0.0)))),
                             key=widget_key,
                             help=str(field.get("help", "")) if field.get("help") else None,
                         )
                     )
             records.append(record)
     st.session_state[card_key] = records
+    st.session_state[f"persist_{card_key}"] = records
     return pd.DataFrame(records)
 
 
@@ -1465,12 +1974,20 @@ def render_t_slip_wizard_card(title: str, card_key: str, fields: list[dict[str, 
         st.caption(f"Should you fill this? {microcopy['should_fill']}")
     if microcopy.get("tip"):
         st.caption(f"Quick tip: {microcopy['tip']}")
+    current_records = st.session_state.get(card_key)
+    persisted_records = st.session_state.get(f"persist_{card_key}")
+    source_records = current_records if isinstance(current_records, list) else persisted_records if isinstance(persisted_records, list) else []
+    default_count = max(
+        int(st.session_state.get(f"{card_key}_count", 0)),
+        len(source_records),
+        count_default,
+    )
     count = int(
         st.number_input(
             f"Number of {title}",
             min_value=0,
             step=1,
-            value=int(st.session_state.get(f"{card_key}_count", count_default)),
+            value=default_count,
             key=f"{card_key}_count",
         )
     )
@@ -1483,13 +2000,15 @@ def render_t_slip_wizard_card(title: str, card_key: str, fields: list[dict[str, 
             for field_index, field in enumerate(fields):
                 col = columns[field_index % 2]
                 field_id = str(field["id"])
+                widget_key = f"{card_key}_{index}_{field_id}"
+                fallback_value = float((source_records[index] if index < len(source_records) else {}).get(field_id, 0.0))
                 record[field_id] = float(
                     col.number_input(
                         str(field["label"]),
                         min_value=0.0,
                         step=float(field.get("step", 100.0)),
-                        value=float(st.session_state.get(f"{card_key}_{index}_{field_id}", 0.0)),
-                        key=f"{card_key}_{index}_{field_id}",
+                        value=float(st.session_state.get(widget_key, fallback_value)),
+                        key=widget_key,
                         help=str(field.get("help", "")) if field.get("help") else None,
                     )
                 )
@@ -1568,9 +2087,11 @@ def read_record_card_editor_state(
     count_default: int = 1,
 ) -> pd.DataFrame:
     stored_records = st.session_state.get(card_key)
-    if isinstance(stored_records, list):
+    persisted_records = st.session_state.get(f"persist_{card_key}")
+    source_records = stored_records if isinstance(stored_records, list) else persisted_records
+    if isinstance(source_records, list):
         normalized_records: list[dict[str, object]] = []
-        for stored_record in stored_records:
+        for stored_record in source_records:
             normalized_record: dict[str, object] = {}
             for field in fields:
                 field_id = str(field["id"])
@@ -1581,7 +2102,10 @@ def read_record_card_editor_state(
                     normalized_record[field_id] = float((stored_record or {}).get(field_id, field.get("value", 0.0)))
             normalized_records.append(normalized_record)
         return pd.DataFrame(normalized_records)
-    count = int(st.session_state.get(f"{card_key}_count", count_default))
+    count = max(
+        int(st.session_state.get(f"{card_key}_count", count_default)),
+        len(source_records) if isinstance(source_records, list) else 0,
+    )
     records: list[dict[str, object]] = []
     for index in range(count):
         record: dict[str, object] = {}
@@ -2591,36 +3115,36 @@ if current_step == 5:
         with household_tabs[0]:
             with st.container(border=True):
                 marital_col1, marital_col2 = st.columns(2)
-                spouse_claim_enabled = marital_col1.checkbox(
+                spouse_claim_enabled = checkbox_input(
                     "Claim spouse / common-law partner amount",
-                    value=bool(st.session_state.get("spouse_claim_enabled", False)),
-                    key="spouse_claim_enabled",
+                    "spouse_claim_enabled",
+                    container=marital_col1,
                 )
-                has_spouse_end_of_year = marital_col1.checkbox(
+                has_spouse_end_of_year = checkbox_input(
                     "Had a spouse or common-law partner at year end",
-                    value=bool(st.session_state.get("has_spouse_end_of_year", False)),
-                    key="has_spouse_end_of_year",
+                    "has_spouse_end_of_year",
+                    container=marital_col1,
                 )
-                separated_in_year = marital_col1.checkbox(
+                separated_in_year = checkbox_input(
                     "Separated during the year",
-                    value=bool(st.session_state.get("separated_in_year", False)),
-                    key="separated_in_year",
+                    "separated_in_year",
+                    container=marital_col1,
                 )
-                support_payments_to_spouse = marital_col1.checkbox(
+                support_payments_to_spouse = checkbox_input(
                     "Paid support to spouse / partner",
-                    value=bool(st.session_state.get("support_payments_to_spouse", False)),
-                    key="support_payments_to_spouse",
+                    "support_payments_to_spouse",
+                    container=marital_col1,
                 )
-                spouse_infirm = marital_col2.checkbox(
+                spouse_infirm = checkbox_input(
                     "Spouse / partner is infirm",
-                    value=bool(st.session_state.get("spouse_infirm", False)),
-                    key="spouse_infirm",
+                    "spouse_infirm",
+                    container=marital_col2,
                 )
-                spouse_disability_transfer_available = marital_col2.checkbox(
+                spouse_disability_transfer_available = checkbox_input(
                     "Spouse / partner has unused disability transfer",
-                    value=bool(st.session_state.get("spouse_disability_transfer_available", False)),
-                    key="spouse_disability_transfer_available",
-                    help="Check if the spouse/common-law partner has an unused disability amount transfer available to claim.",
+                    "spouse_disability_transfer_available",
+                    help_text="Check if the spouse/common-law partner has an unused disability amount transfer available to claim.",
+                    container=marital_col2,
                 )
                 spouse_disability_transfer_available_amount = number_input(
                     "Unused spouse / partner disability transfer amount",
@@ -2637,20 +3161,20 @@ if current_step == 5:
         with household_tabs[1]:
             with st.container(border=True):
                 dep_col1, dep_col2 = st.columns(2)
-                eligible_dependant_claim_enabled = dep_col1.checkbox(
+                eligible_dependant_claim_enabled = checkbox_input(
                     "Claim an eligible dependant amount",
-                    value=bool(st.session_state.get("eligible_dependant_claim_enabled", False)),
-                    key="eligible_dependant_claim_enabled",
+                    "eligible_dependant_claim_enabled",
+                    container=dep_col1,
                 )
-                eligible_dependant_infirm = dep_col1.checkbox(
+                eligible_dependant_infirm = checkbox_input(
                     "Dependant is infirm",
-                    value=bool(st.session_state.get("eligible_dependant_infirm", False)),
-                    key="eligible_dependant_infirm",
+                    "eligible_dependant_infirm",
+                    container=dep_col1,
                 )
-                dependant_lived_with_you = dep_col1.checkbox(
+                dependant_lived_with_you = checkbox_input(
                     "Dependant lived with you",
-                    value=bool(st.session_state.get("dependant_lived_with_you", False)),
-                    key="dependant_lived_with_you",
+                    "dependant_lived_with_you",
+                    container=dep_col1,
                 )
                 eligible_dependant_net_income = number_input(
                     "Dependant net income",
@@ -2658,41 +3182,27 @@ if current_step == 5:
                     100.0,
                     "Used to estimate the eligible dependant amount if you are claiming it.",
                 )
-                dependant_relationship = dep_col2.selectbox(
+                dependant_relationship = selectbox_input(
                     "Dependant relationship to you",
                     ["Child", "Parent/Grandparent", "Other relative", "Other"],
-                    index=["Child", "Parent/Grandparent", "Other relative", "Other"].index(str(st.session_state.get("dependant_relationship", "Child")) if str(st.session_state.get("dependant_relationship", "Child")) in ["Child", "Parent/Grandparent", "Other relative", "Other"] else "Child"),
-                    key="dependant_relationship",
-                    help="Used in household-claim restriction checks.",
+                    "dependant_relationship",
+                    "Child",
+                    help_text="Used in household-claim restriction checks.",
+                    container=dep_col2,
                 )
-                dependant_category = dep_col2.selectbox(
+                dependant_category = selectbox_input(
                     "Dependant type",
                     ["Minor child", "Adult child", "Parent/Grandparent", "Other adult relative", "Other"],
-                    index=[
-                        "Minor child",
-                        "Adult child",
-                        "Parent/Grandparent",
-                        "Other adult relative",
-                        "Other",
-                    ].index(
-                        str(st.session_state.get("dependant_category", "Minor child"))
-                        if str(st.session_state.get("dependant_category", "Minor child")) in [
-                            "Minor child",
-                            "Adult child",
-                            "Parent/Grandparent",
-                            "Other adult relative",
-                            "Other",
-                        ]
-                        else "Minor child"
-                    ),
-                    key="dependant_category",
-                    help="Used for finer household and transfer restriction checks.",
+                    "dependant_category",
+                    "Minor child",
+                    help_text="Used for finer household and transfer restriction checks.",
+                    container=dep_col2,
                 )
-                dependant_disability_transfer_available = dep_col2.checkbox(
+                dependant_disability_transfer_available = checkbox_input(
                     "Dependant has unused disability transfer",
-                    value=bool(st.session_state.get("dependant_disability_transfer_available", False)),
-                    key="dependant_disability_transfer_available",
-                    help="Check if the dependant has an unused disability amount transfer available.",
+                    "dependant_disability_transfer_available",
+                    help_text="Check if the dependant has an unused disability amount transfer available.",
+                    container=dep_col2,
                 )
                 dependant_disability_transfer_available_amount = number_input(
                     "Unused dependant disability transfer amount",
@@ -2703,57 +3213,51 @@ if current_step == 5:
         with household_tabs[2]:
             with st.container(border=True):
                 restrict_col1, restrict_col2 = st.columns(2)
-                paid_child_support_for_dependant = restrict_col1.checkbox(
+                paid_child_support_for_dependant = checkbox_input(
                     "You paid child support for this dependant",
-                    value=bool(st.session_state.get("paid_child_support_for_dependant", False)),
-                    key="paid_child_support_for_dependant",
+                    "paid_child_support_for_dependant",
+                    container=restrict_col1,
                 )
-                shared_custody_claim_agreement = restrict_col1.checkbox(
+                shared_custody_claim_agreement = checkbox_input(
                     "There is a shared-custody claim agreement",
-                    value=bool(st.session_state.get("shared_custody_claim_agreement", False)),
-                    key="shared_custody_claim_agreement",
+                    "shared_custody_claim_agreement",
+                    container=restrict_col1,
                 )
-                another_household_member_claims_dependant = restrict_col1.checkbox(
+                another_household_member_claims_dependant = checkbox_input(
                     "Someone else in the household is claiming this dependant",
-                    value=bool(st.session_state.get("another_household_member_claims_dependant", False)),
-                    key="another_household_member_claims_dependant",
+                    "another_household_member_claims_dependant",
+                    container=restrict_col1,
                 )
-                another_household_member_claims_caregiver = restrict_col2.checkbox(
+                another_household_member_claims_caregiver = checkbox_input(
                     "Someone else is claiming the caregiver amount",
-                    value=bool(st.session_state.get("another_household_member_claims_caregiver", False)),
-                    key="another_household_member_claims_caregiver",
+                    "another_household_member_claims_caregiver",
+                    container=restrict_col2,
                 )
-                another_household_member_claims_disability_transfer = restrict_col2.checkbox(
+                another_household_member_claims_disability_transfer = checkbox_input(
                     "Someone else is claiming the disability transfer",
-                    value=bool(st.session_state.get("another_household_member_claims_disability_transfer", False)),
-                    key="another_household_member_claims_disability_transfer",
+                    "another_household_member_claims_disability_transfer",
+                    container=restrict_col2,
                 )
-                medical_dependant_claim_shared = restrict_col2.checkbox(
+                medical_dependant_claim_shared = checkbox_input(
                     "Someone else is sharing or claiming this dependant's medical expenses",
-                    value=bool(st.session_state.get("medical_dependant_claim_shared", False)),
-                    key="medical_dependant_claim_shared",
+                    "medical_dependant_claim_shared",
+                    container=restrict_col2,
                 )
-                caregiver_claim_target = restrict_col2.selectbox(
+                caregiver_claim_target = selectbox_input(
                     "Caregiver claim should apply to",
                     ["Auto", "Spouse", "Dependant"],
-                    index=["Auto", "Spouse", "Dependant"].index(
-                        str(st.session_state.get("caregiver_claim_target", "Auto"))
-                        if str(st.session_state.get("caregiver_claim_target", "Auto")) in ["Auto", "Spouse", "Dependant"]
-                        else "Auto"
-                    ),
-                    key="caregiver_claim_target",
-                    help="Use this when both spouse and dependant could qualify and you want to control which household member the caregiver claim is tied to.",
+                    "caregiver_claim_target",
+                    "Auto",
+                    help_text="Use this when both spouse and dependant could qualify and you want to control which household member the caregiver claim is tied to.",
+                    container=restrict_col2,
                 )
-                disability_transfer_source = restrict_col2.selectbox(
+                disability_transfer_source = selectbox_input(
                     "Disability transfer should come from",
                     ["Auto", "Spouse", "Dependant"],
-                    index=["Auto", "Spouse", "Dependant"].index(
-                        str(st.session_state.get("disability_transfer_source", "Auto"))
-                        if str(st.session_state.get("disability_transfer_source", "Auto")) in ["Auto", "Spouse", "Dependant"]
-                        else "Auto"
-                    ),
-                    key="disability_transfer_source",
-                    help="Choose the source of the disability transfer when both spouse and dependant could qualify.",
+                    "disability_transfer_source",
+                    "Auto",
+                    help_text="Choose the source of the disability transfer when both spouse and dependant could qualify.",
+                    container=restrict_col2,
                 )
         with st.expander("Additional Dependants", expanded=False):
             st.caption("Open this only if you have more than one dependant.")
@@ -2830,33 +3334,31 @@ if current_step == 5:
     with st.expander("Refundable Credits", expanded=False):
         st.caption("Open this only if you need refundable credits or manual overrides.")
         refundable_col1, refundable_col2 = st.columns(2)
-        canada_workers_benefit = refundable_col1.number_input(
+        canada_workers_benefit = number_input(
             "Canada Workers Benefit Manual Amount",
-            min_value=0.0,
-            step=100.0,
-            value=float(st.session_state.get("canada_workers_benefit", 0.0)),
-            key="canada_workers_benefit",
-            help="Leave at 0 to use the app's estimate. Enter your own amount only if you are following the worksheet manually.",
+            "canada_workers_benefit",
+            100.0,
+            "Leave at 0 to use the app's estimate. Enter your own amount only if you are following the worksheet manually.",
         )
-        cwb_basic_eligible = refundable_col1.checkbox(
+        cwb_basic_eligible = checkbox_input(
             "Eligible for CWB",
-            value=bool(st.session_state.get("cwb_basic_eligible", False)),
-            key="cwb_basic_eligible",
-            help="Check this if you want the app to include an automatic Canada Workers Benefit estimate. If you leave this unchecked, the app will not auto-calculate line 45300.",
+            "cwb_basic_eligible",
+            help_text="Check this if you want the app to include an automatic Canada Workers Benefit estimate. If you leave this unchecked, the app will not auto-calculate line 45300.",
+            container=refundable_col1,
         )
-        cwb_disability_supplement_eligible = refundable_col1.checkbox(
+        cwb_disability_supplement_eligible = checkbox_input(
             "Eligible for CWB Disability Supplement",
-            value=bool(st.session_state.get("cwb_disability_supplement_eligible", False)),
-            key="cwb_disability_supplement_eligible",
-            help="Check this if the taxpayer is eligible for the disability tax credit and you want the app to include the CWB disability supplement in the 2025 auto estimate.",
+            "cwb_disability_supplement_eligible",
+            help_text="Check this if the taxpayer is eligible for the disability tax credit and you want the app to include the CWB disability supplement in the 2025 auto estimate.",
+            container=refundable_col1,
         )
         spouse_cwb_disability_supplement_eligible = False
         if has_spouse_end_of_year:
-            spouse_cwb_disability_supplement_eligible = refundable_col1.checkbox(
+            spouse_cwb_disability_supplement_eligible = checkbox_input(
                 "Spouse Also Eligible for CWB Disability Supplement",
-                value=bool(st.session_state.get("spouse_cwb_disability_supplement_eligible", False)),
-                key="spouse_cwb_disability_supplement_eligible",
-                help="Used only for the family-income phaseout path in the app's 2025 disability-supplement estimate.",
+                "spouse_cwb_disability_supplement_eligible",
+                help_text="Used only for the family-income phaseout path in the app's 2025 disability-supplement estimate.",
+                container=refundable_col1,
             )
         canada_training_credit_limit_available = refundable_col1.number_input(
             "Canada Training Credit Limit Available",
@@ -3172,11 +3674,10 @@ if current_step == 5:
             "The estimator applies a 40% Manitoba fertility treatment credit, capped at $16,000.",
         )
     elif province == "NS":
-        volunteer_flag = st.checkbox(
+        volunteer_flag = checkbox_input(
             "NS479 Volunteer Firefighter / Search and Rescue Credit",
-            value=bool(st.session_state.get("ns479_volunteer_flag", False)),
-            key="ns479_volunteer_flag",
-            help="If eligible, the app enters the fixed $500 NS479 credit.",
+            "ns479_volunteer_flag",
+            help_text="If eligible, the app enters the fixed $500 NS479 credit.",
         )
         ns479_volunteer_credit = 500.0 if volunteer_flag else 0.0
         ns479_childrens_sports_arts_credit = number_input(
@@ -3199,17 +3700,17 @@ if current_step == 5:
             "The estimator applies the Ontario seniors' public transit tax credit if age 65 or older.",
         )
     elif province == "BC":
-        bc_renters_credit_eligible = sp_col1.checkbox(
+        bc_renters_credit_eligible = checkbox_input(
             "BC Renter's Tax Credit Eligible",
-            value=bool(st.session_state.get("bc_renters_credit_eligible", False)),
-            key="bc_renters_credit_eligible",
-            help="Check if the taxpayer qualifies to claim the B.C. renter's tax credit.",
+            "bc_renters_credit_eligible",
+            help_text="Check if the taxpayer qualifies to claim the B.C. renter's tax credit.",
+            container=sp_col1,
         )
-        bc_home_renovation_eligible = sp_col2.checkbox(
+        bc_home_renovation_eligible = checkbox_input(
             "BC Home Renovation Credit Eligible",
-            value=bool(st.session_state.get("bc_home_renovation_eligible", False)),
-            key="bc_home_renovation_eligible",
-            help="Check if the taxpayer or qualifying household qualifies for the B.C. home renovation credit.",
+            "bc_home_renovation_eligible",
+            help_text="Check if the taxpayer or qualifying household qualifies for the B.C. home renovation credit.",
+            container=sp_col2,
         )
         bc_home_renovation_expenses = number_input(
             "BC Home Renovation Eligible Expenses",
@@ -3225,11 +3726,11 @@ if current_step == 5:
             "The estimator applies the Saskatchewan refundable fertility treatment tax credit to eligible expenses.",
         )
     elif province == "PE":
-        pe_volunteer_credit_eligible = sp_col1.checkbox(
+        pe_volunteer_credit_eligible = checkbox_input(
             "PE Volunteer Firefighter / Search and Rescue Credit Eligible",
-            value=bool(st.session_state.get("pe_volunteer_credit_eligible", False)),
-            key="pe_volunteer_credit_eligible",
-            help="Check if the taxpayer qualifies for the Prince Edward Island volunteer firefighter or volunteer search and rescue personnel tax credit.",
+            "pe_volunteer_credit_eligible",
+            help_text="Check if the taxpayer qualifies for the Prince Edward Island volunteer firefighter or volunteer search and rescue personnel tax credit.",
+            container=sp_col1,
         )
     elif province == "NB":
         nb_political_contribution_credit = number_input("NB428 Political Contribution Credit", "nb_political_contribution_credit", 50.0)

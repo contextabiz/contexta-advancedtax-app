@@ -179,8 +179,8 @@ def build_eligibility_guidance(
         add_item({
             "id": "general_follow_up",
             "priority": "maybe",
-            "what": "Check for deductions and common credits even if you already entered all your slips.",
-            "why": "Many first-time filers miss claimable items simply because they stop after entering slips.",
+            "what": "Review whether deductions and common credits are still available, even if the slip entry already looks complete.",
+            "why": "A return can still be leaving tax savings on the table when the slip entry is accurate but deduction, credit, or household claims have not been reviewed yet.",
             "where": "Step 4 -> Deductions and Step 5 -> Common Credits And Claim Amounts",
             "estimated_here": True,
             "confidence": "high",
