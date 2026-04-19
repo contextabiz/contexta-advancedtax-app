@@ -1517,9 +1517,28 @@ def read_slip_wizard_records_from_state(configs: list[dict[str, object]]) -> dic
         card_key = str(config["key"])
         fields = list(config["fields"])
         stored_records = st.session_state.get(card_key)
+        persisted_records = st.session_state.get(f"persist_{card_key}")
         if isinstance(stored_records, list):
             normalized_records: list[dict[str, float]] = []
-            for index, stored_record in enumerate(stored_records):
+            count = max(int(st.session_state.get(f"{card_key}_count", 0)), len(stored_records))
+            for index in range(count):
+                stored_record = stored_records[index] if index < len(stored_records) else {}
+                normalized_record: dict[str, float] = {}
+                for field in fields:
+                    field_id = str(field["id"])
+                    widget_key = f"{card_key}_{index}_{field_id}"
+                    if widget_key in st.session_state:
+                        normalized_record[field_id] = float(st.session_state.get(widget_key, 0.0))
+                    else:
+                        normalized_record[field_id] = float((stored_record or {}).get(field_id, 0.0))
+                normalized_records.append(normalized_record)
+            records_by_key[card_key] = normalized_records
+            continue
+        if isinstance(persisted_records, list):
+            normalized_records = []
+            count = max(int(st.session_state.get(f"{card_key}_count", 0)), len(persisted_records))
+            for index in range(count):
+                stored_record = persisted_records[index] if index < len(persisted_records) else {}
                 normalized_record: dict[str, float] = {}
                 for field in fields:
                     field_id = str(field["id"])
@@ -1978,6 +1997,12 @@ if current_step == 1:
     t3_wizard_records = wizard_records["t3_wizard"]
     t4ps_wizard_records = wizard_records["t4ps_wizard"]
     t2202_wizard_records = wizard_records["t2202_wizard"]
+    st.session_state["persist_t4_wizard"] = t4_wizard_records
+    st.session_state["persist_t4a_wizard"] = t4a_wizard_records
+    st.session_state["persist_t5_wizard"] = t5_wizard_records
+    st.session_state["persist_t3_wizard"] = t3_wizard_records
+    st.session_state["persist_t4ps_wizard"] = t4ps_wizard_records
+    st.session_state["persist_t2202_wizard"] = t2202_wizard_records
     nav_col1, nav_col2 = st.columns([1, 1])
     with nav_col2:
         if st.button("Next", key="next_step_1", use_container_width=True):
@@ -3598,22 +3623,6 @@ if current_step == 7:
             ("Tax Withheld", income_tax_withheld_total),
         ]
         render_metric_row(current_input_summary, 4)
-        household_refundable_flags: list[str] = []
-        if wizard_spouse_claim_enabled and wizard_has_spouse_end_of_year:
-            household_refundable_flags.append(
-                f"Spouse amount active (preview: {format_currency(wizard_spouse_amount_preview)}, spouse net income: {format_currency(wizard_spouse_net_income)})"
-            )
-        elif wizard_spouse_claim_enabled:
-            if not wizard_has_spouse_end_of_year:
-                household_refundable_flags.append("Spouse amount not yet active: also confirm spouse/common-law status at year end")
-            elif wizard_separated_in_year:
-                household_refundable_flags.append("Spouse amount blocked: separated during the year is turned on")
-            elif wizard_support_payments_to_spouse:
-                household_refundable_flags.append("Spouse amount blocked: support payments to spouse / partner are turned on")
-        if wizard_cwb_basic_eligible:
-            household_refundable_flags.append(f"CWB active (preview: {format_currency(wizard_cwb_preview_credit)})")
-        if household_refundable_flags:
-            st.caption("Household / refundable summary: " + " | ".join(household_refundable_flags))
         st.divider()
         st.markdown("###### Diagnostic Status")
         render_metric_row(
@@ -3899,8 +3908,8 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             province_name=province_name,
         )
         summary_wizard_signal_totals = {
-            "t3": float(bool(st.session_state.get("t3_wizard", []))),
-            "t5": float(bool(st.session_state.get("t5_wizard", []))),
+            "t3": float(t3_wizard_totals.sum()) if hasattr(t3_wizard_totals, "sum") else 0.0,
+            "t5": float(t5_wizard_totals.sum()) if hasattr(t5_wizard_totals, "sum") else 0.0,
         }
         summary_raw_input_signals = {
             "tax_year": tax_year,

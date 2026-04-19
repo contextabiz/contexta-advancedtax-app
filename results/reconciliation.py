@@ -125,14 +125,14 @@ def build_slip_reconciliation_df(
         return f"{area} needs review because the final amount does not reconcile cleanly to the entered slip and manual totals."
 
     eligible_dividend_slip_total = (
-        float(t5_wizard_totals.get("box25_taxable_eligible_dividends", 0.0))
-        + float(t3_wizard_totals.get("box50_taxable_eligible_dividends", 0.0))
-        + float(t4ps_wizard_totals.get("box31_taxable_eligible_dividends", 0.0))
+        float(t5_wizard_totals.get("box25_eligible_dividends_taxable", 0.0))
+        + float(t3_wizard_totals.get("box50_eligible_dividends_taxable", 0.0))
+        + float(t4ps_wizard_totals.get("box31_eligible_dividends_taxable", 0.0))
     )
     non_eligible_dividend_slip_total = (
-        float(t5_wizard_totals.get("box11_taxable_non_eligible_dividends", 0.0))
-        + float(t3_wizard_totals.get("box32_taxable_non_eligible_dividends", 0.0))
-        + float(t4ps_wizard_totals.get("box25_taxable_non_eligible_dividends", 0.0))
+        float(t5_wizard_totals.get("box11_non_eligible_dividends_taxable", 0.0))
+        + float(t3_wizard_totals.get("box32_non_eligible_dividends_taxable", 0.0))
+        + float(t4ps_wizard_totals.get("box25_non_eligible_dividends_taxable", 0.0))
     )
     foreign_income_slip_total = (
         float(t5_wizard_totals.get("box15_foreign_income", 0.0))
@@ -144,12 +144,12 @@ def build_slip_reconciliation_df(
         + float(t3_wizard_totals.get("box34_foreign_tax_paid", 0.0))
     )
     federal_dividend_credit_slip_total = (
-        float(t5_wizard_totals.get("box26_eligible_dividend_tax_credit", 0.0))
-        + float(t5_wizard_totals.get("box12_non_eligible_dividend_tax_credit", 0.0))
-        + float(t3_wizard_totals.get("box51_eligible_dividend_tax_credit", 0.0))
-        + float(t3_wizard_totals.get("box39_non_eligible_dividend_tax_credit", 0.0))
-        + float(t4ps_wizard_totals.get("box32_eligible_dividend_tax_credit", 0.0))
-        + float(t4ps_wizard_totals.get("box26_non_eligible_dividend_tax_credit", 0.0))
+        float(t5_wizard_totals.get("box26_eligible_dividend_credit", 0.0))
+        + float(t5_wizard_totals.get("box12_non_eligible_dividend_credit", 0.0))
+        + float(t3_wizard_totals.get("box51_eligible_dividend_credit", 0.0))
+        + float(t3_wizard_totals.get("box39_non_eligible_dividend_credit", 0.0))
+        + float(t4ps_wizard_totals.get("box32_eligible_dividend_credit", 0.0))
+        + float(t4ps_wizard_totals.get("box26_non_eligible_dividend_credit", 0.0))
     )
 
     rows = [
