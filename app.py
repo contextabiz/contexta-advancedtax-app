@@ -7,7 +7,6 @@ import pandas as pd
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, TypedDict
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
@@ -17,11 +16,16 @@ from guidance import (
     build_completion_flags,
     build_screening_inputs,
     build_section_progress,
+    build_step5_checkpoint_suggestions as step5_build_checkpoint_suggestions,
+    build_step5_optimization_preview as step5_build_optimization_preview,
+    build_step5_section_statuses as step5_build_section_statuses,
     build_suggestions,
+    render_carryforward_mini_worksheet as step5_render_carryforward_mini_worksheet,
+    render_step5_optimization_checkpoint as step5_render_optimization_checkpoint,
+    render_step5_section_intro as step5_render_section_intro,
     SuggestionItem,
 )
 from diagnostics import (
-    DiagnosticItem,
     build_filing_readiness_df,
     build_results_quick_notes,
     collect_diagnostics,
@@ -29,21 +33,13 @@ from diagnostics import (
     render_diagnostics_panel,
 )
 from eligibility import (
-    build_postcalc_rules_diagnostics,
-    build_rules_diagnostics,
-    EligibilityContext,
-    EligibilityDecision,
-    EligibilityRuleResult,
-    build_eligibility_context,
     build_eligibility_decision,
-    evaluate_eligibility_rules,
 )
 from results import (
     build_assumptions_overrides_df,
     build_client_key_drivers_df,
-    build_client_summary_cta,
     build_client_summary_df,
-    build_client_summary_notes,
+    build_return_memo_html as results_build_return_memo_html,
     build_missing_support_df,
     build_on428_part_c_df,
     build_on428a_lift_df,
@@ -58,6 +54,8 @@ from results import (
     build_summary_df,
     build_t776_df,
     build_federal_net_tax_build_up_df,
+    render_advisor_scenario_compare as results_render_advisor_scenario_compare,
+    render_tax_optimization_panel as results_render_tax_optimization_panel,
 )
 from tax_config import AVAILABLE_PROVINCES, AVAILABLE_TAX_YEARS, PROVINCES, TAX_CONFIGS
 from tax_engine import calculate_personal_tax_return
@@ -71,6 +69,7 @@ from tax_engine.credits import (
     calculate_spouse_amount,
 )
 from tax_engine.utils import calculate_federal_bpa, estimate_employee_cpp_ei
+from ui_config import PROVINCIAL_CAREGIVER_HELP
 
 META_TITLE = "Canadian Personal Tax Estimator | Advanced Federal & Provincial Tax Calculator"
 META_DESCRIPTION = (
@@ -112,15 +111,6 @@ FLOW_STEPS = [
     (6, "Payments and Withholdings"),
     (7, "Summary & Pre-Calculation Diagnostics"),
 ]
-PROVINCIAL_CAREGIVER_HELP = {
-    "AB": "AB428 caregiver amount base. Alberta's 2025 maximum is $12,922 per dependant before applying the 6% credit rate.",
-    "NB": "NB428 caregiver amount base. New Brunswick's 2025 infirm dependant amount is up to $5,839 before applying the 9.4% credit rate.",
-    "NL": "NL428 caregiver/infirm dependant base. Enter the eligible base amount from your worksheet if applicable.",
-    "NS": "NS428 caregiver amount base. Enter the eligible amount from your worksheet if applicable.",
-    "ON": "Ontario caregiver claim amount base if applicable.",
-    "PE": "PE428 infirm dependant amount base. Prince Edward Island's 2025 amount is up to $2,446 before the provincial credit rate.",
-    "SK": "SK428 caregiver amount base. Saskatchewan's 2025 maximum is $13,986 per dependant before the 10.5% credit rate.",
-}
 SLIP_WIZARD_CONFIGS = [
     {
         "tab": "T4",
@@ -970,73 +960,6 @@ def build_tax_optimization_memo(
     return lead, items[:2]
 
 
-def build_result_driver_sections(result: dict) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-    helping: list[tuple[float, str, str]] = []
-    keeping_high: list[tuple[float, str, str]] = []
-
-    def add_helping(amount: float, title: str, body: str) -> None:
-        if amount > 0:
-            helping.append((amount, title, body))
-
-    def add_keeping_high(amount: float, title: str, body: str) -> None:
-        if amount > 0:
-            keeping_high.append((amount, title, body))
-
-    withholding = float(result.get("income_tax_withheld", 0.0))
-    total_deductions = float(result.get("total_deductions", 0.0))
-    refundable_credits = float(result.get("refundable_credits", 0.0))
-    foreign_tax_credits = float(result.get("federal_foreign_tax_credit", 0.0)) + float(result.get("provincial_foreign_tax_credit", 0.0))
-    tuition_claim = float(result.get("schedule11_total_claim_used", 0.0))
-    donation_credits = float(result.get("federal_donation_credit", 0.0)) + float(result.get("provincial_donation_credit", 0.0))
-    spouse_claim = float(result.get("line_30300", 0.0))
-    total_payable = float(result.get("total_payable", 0.0))
-    taxable_income = float(result.get("taxable_income", 0.0))
-    balance_owing = float(result.get("line_48500_balance_owing", 0.0))
-    refund_amount = float(result.get("line_48400_refund", 0.0))
-
-    add_helping(withholding, "Tax withheld already on file", "Withholding from slips or manual entries is materially supporting the current result.")
-    add_helping(total_deductions, "Deductions reducing income", "Deductions are reducing taxable income and helping the current return position.")
-    add_helping(refundable_credits, "Refundable credits improving the result", "Refundable credits are directly improving the refund or reducing the balance owing.")
-    add_helping(foreign_tax_credits, "Foreign tax credits active", "Foreign tax credits are already helping reduce tax in the estimate.")
-    add_helping(tuition_claim, "Tuition claim active", "Tuition is already contributing to the current credit position.")
-    add_helping(donation_credits, "Donation credits active", "Donation claims are already helping reduce tax in the estimate.")
-    add_helping(spouse_claim, "Household claim position active", "A spouse or household-related claim is already contributing to the estimate.")
-
-    if balance_owing > 0:
-        add_keeping_high(total_payable, "Total tax payable still material", "The gross tax otherwise payable is still a meaningful driver of the current outcome.")
-        add_keeping_high(taxable_income, "Taxable income still elevated", "Taxable income remains high enough to keep pressure on the final tax result.")
-        add_keeping_high(balance_owing, "Balance owing still showing", "A balance owing is still present, which suggests the current deductions, credits, and withholding have not fully offset payable.")
-    elif refund_amount > 0 and total_payable > max(500.0, refund_amount * 0.5):
-        add_keeping_high(
-            total_payable,
-            "Underlying tax is still material",
-            "The refund appears to be driven more by withholding and credits than by a low-tax result on its own, so planning items may still matter.",
-        )
-        if taxable_income > 30000.0:
-            add_keeping_high(
-                taxable_income,
-                "Taxable income is still carrying weight",
-                "Even in a refund position, the income level is still high enough that deductions and available credits can still change the final outcome.",
-            )
-
-    helping.sort(key=lambda row: row[0], reverse=True)
-    keeping_high.sort(key=lambda row: row[0], reverse=True)
-    return (
-        [(title, body) for _, title, body in helping[:3]],
-        [(title, body) for _, title, body in keeping_high[:3]],
-    )
-
-
-def render_result_signal_panel(title: str, items: list[tuple[str, str]]) -> None:
-    if not items:
-        return
-    with st.container(border=True):
-        st.markdown(f"##### {title}")
-        for heading, body in items:
-            st.markdown(f"**{heading}**")
-            st.caption(body)
-
-
 def render_tax_optimization_panel(result: dict, suggestions: "list[SuggestionItem] | None" = None) -> None:
     lead, items = build_tax_optimization_memo(result, suggestions)
     if not items and not lead:
@@ -1047,29 +970,6 @@ def render_tax_optimization_panel(result: dict, suggestions: "list[SuggestionIte
             st.caption(lead)
         for heading, body in items:
             st.markdown(f"- **{heading}**: {body}")
-
-
-def render_result_driver_panel(result: dict) -> None:
-    helping_items, keeping_high_items = build_result_driver_sections(result)
-    if not helping_items and not keeping_high_items:
-        return
-    with st.container(border=True):
-        st.markdown("##### What Drives This Result")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**What Is Helping The Result**")
-            if helping_items:
-                for heading, body in helping_items:
-                    st.markdown(f"- **{heading}**: {body}")
-            else:
-                st.caption("No obvious positive drivers are standing out yet from the current inputs.")
-        with col2:
-            st.markdown("**What Is Keeping Tax High**")
-            if keeping_high_items:
-                for heading, body in keeping_high_items:
-                    st.markdown(f"- **{heading}**: {body}")
-            else:
-                st.caption("No strong upward tax drivers are currently standing out from the current inputs.")
 
 
 def render_step5_optimization_checkpoint(
@@ -1196,6 +1096,216 @@ def build_step5_checkpoint_suggestions(
         )
 
     return suggestions
+
+
+def build_step5_section_statuses(
+    *,
+    session_state,
+    t2202_wizard_totals,
+    province_name: str,
+) -> dict[str, dict[str, str]]:
+    spouse_net_income = float(session_state.get("spouse_net_income", session_state.get("persist_spouse_net_income", 0.0)))
+    has_spouse_end_of_year = bool(session_state.get("has_spouse_end_of_year", session_state.get("persist_has_spouse_end_of_year", False)))
+    spouse_claim_enabled = bool(session_state.get("spouse_claim_enabled", session_state.get("persist_spouse_claim_enabled", False)))
+    eligible_dependant_claim_enabled = bool(
+        session_state.get("eligible_dependant_claim_enabled", session_state.get("persist_eligible_dependant_claim_enabled", False))
+    )
+    tuition_available = float(t2202_wizard_totals.get("box26_total_eligible_tuition", 0.0)) or float(
+        t2202_wizard_totals.get("box23_session_tuition", 0.0)
+    )
+    tuition_claim_requested = float(session_state.get("tuition_amount_claim", 0.0))
+    tuition_transfer_from_spouse = float(session_state.get("tuition_transfer_from_spouse", 0.0))
+    student_loan_interest = float(session_state.get("student_loan_interest", 0.0))
+    medical_expenses_paid = float(session_state.get("medical_expenses_paid", 0.0))
+    charitable_donations = float(session_state.get("charitable_donations", 0.0))
+    disability_amount_claim = float(session_state.get("disability_amount_claim", 0.0))
+    additional_federal_credits = float(session_state.get("additional_federal_credits", 0.0))
+    additional_provincial_credit_amount = float(session_state.get("additional_provincial_credit_amount", 0.0))
+    cwb_basic_eligible = bool(session_state.get("cwb_basic_eligible", session_state.get("persist_cwb_basic_eligible", False)))
+    cwb_disability_supplement_eligible = bool(
+        session_state.get("cwb_disability_supplement_eligible", session_state.get("persist_cwb_disability_supplement_eligible", False))
+    )
+    canada_workers_benefit = float(session_state.get("canada_workers_benefit", 0.0))
+    canada_training_credit_limit_available = float(session_state.get("canada_training_credit_limit_available", 0.0))
+    canada_training_credit = float(session_state.get("canada_training_credit", 0.0))
+    medical_expense_supplement = float(session_state.get("medical_expense_supplement", 0.0))
+    foreign_income = float(session_state.get("foreign_income", 0.0))
+    foreign_tax_paid = float(session_state.get("foreign_tax_paid", 0.0))
+    provincial_dividend_tax_credit_manual = float(session_state.get("provincial_dividend_tax_credit_manual", 0.0))
+    tuition_carryforward_records = st.session_state.get("persist_tuition_carryforwards", st.session_state.get("tuition_carryforwards", [])) or []
+    donation_carryforward_records = st.session_state.get("persist_donation_carryforwards", st.session_state.get("donation_carryforwards", [])) or []
+
+    statuses: dict[str, dict[str, str]] = {
+        "common_credits": {
+            "status": "Probably skip",
+            "why": "Open this if you paid tuition, student loan interest, medical expenses, or donations, or if a common non-refundable claim still needs input.",
+            "note": "Nothing obvious is standing out yet from the current Step 5 entries.",
+        },
+        "household": {
+            "status": "Probably skip",
+            "why": "Open this if spouse, dependant, caregiver, support, or disability-transfer facts could change which household claim is supportable.",
+            "note": "No household facts are standing out yet from the current inputs.",
+        },
+        "manual_overrides": {
+            "status": "Probably skip",
+            "why": "Open this only if you already have a worksheet amount or need to override the auto estimate.",
+            "note": "For most returns, this can stay closed.",
+        },
+        "refundable": {
+            "status": "Probably skip",
+            "why": "Open this if lower-income support, CWB, training credit, or the medical expense supplement could still change the result.",
+            "note": "No refundable-credit signal is standing out yet.",
+        },
+        "foreign": {
+            "status": "Probably skip",
+            "why": "Open this only if foreign income, foreign tax paid, or a manual dividend-credit override still needs review.",
+            "note": "If slips already covered the amounts, this section can usually stay closed.",
+        },
+        "carryforwards": {
+            "status": "Probably skip",
+            "why": "Open this if you are bringing forward tuition, donation, or province-specific amounts from a prior year.",
+            "note": "No carryforward signal is standing out yet.",
+        },
+        "province_special": {
+            "status": "Review if applicable",
+            "why": f"Open this only if a {province_name} worksheet, special schedule, or province-specific credit clearly applies.",
+            "note": "This is usually only relevant for special provincial cases.",
+        },
+    }
+
+    if any(value > 0.0 for value in [tuition_available, student_loan_interest, medical_expenses_paid, charitable_donations]):
+        statuses["common_credits"] = {
+            "status": "Looks underused" if tuition_available > 0.0 and tuition_claim_requested <= 0.0 else "Already active",
+            "why": "This section controls the most common Step 5 credits that often change the final result quickly.",
+            "note": (
+                "Tuition is showing but no manual claim has been requested yet."
+                if tuition_available > 0.0 and tuition_claim_requested <= 0.0
+                else "A common-credit input is already active here."
+            ),
+        }
+
+    if spouse_claim_enabled or has_spouse_end_of_year or eligible_dependant_claim_enabled:
+        statuses["household"] = {
+            "status": "Looks underused" if has_spouse_end_of_year and spouse_net_income > 0.0 else "Already active",
+            "why": "Household facts decide whether spouse amount, eligible dependant, caregiver, and disability-transfer claims are available or blocked.",
+            "note": (
+                "Spouse or dependant facts are already showing and may still support a claim review."
+                if has_spouse_end_of_year or eligible_dependant_claim_enabled
+                else "Household review is already active."
+            ),
+        }
+
+    if any(value > 0.0 for value in [disability_amount_claim, tuition_claim_requested, tuition_transfer_from_spouse, additional_federal_credits, additional_provincial_credit_amount]):
+        statuses["manual_overrides"] = {
+            "status": "Already active",
+            "why": "A manual amount is already in play here, so this section now affects the estimate directly.",
+            "note": "Keep this open only for fields you intend to override manually.",
+        }
+
+    if cwb_basic_eligible or cwb_disability_supplement_eligible or any(
+        value > 0.0 for value in [canada_workers_benefit, canada_training_credit_limit_available, canada_training_credit, medical_expense_supplement]
+    ):
+        statuses["refundable"] = {
+            "status": "Already active" if any(value > 0.0 for value in [canada_workers_benefit, canada_training_credit, medical_expense_supplement]) else "Looks underused",
+            "why": "Refundable and income-tested support can move the file even when non-refundable credits are already fully used.",
+            "note": (
+                "An eligibility signal is on, but the section may still need amounts or confirmation."
+                if cwb_basic_eligible and canada_workers_benefit <= 0.0
+                else "A refundable-credit input is already active here."
+            ),
+        }
+
+    if foreign_income > 0.0 or foreign_tax_paid > 0.0 or provincial_dividend_tax_credit_manual > 0.0:
+        statuses["foreign"] = {
+            "status": "Already active",
+            "why": "Foreign income and foreign tax details are easy to misclassify, so this section matters whenever those amounts are in play.",
+            "note": "Manual foreign-income, foreign-tax, or dividend-credit inputs are already active.",
+        }
+
+    if tuition_carryforward_records or donation_carryforward_records or tuition_transfer_from_spouse > 0.0:
+        statuses["carryforwards"] = {
+            "status": "Already active",
+            "why": "Carryforwards and transfers affect what can still be claimed now versus preserved for later years.",
+            "note": "A carryforward or transfer input is already recorded here.",
+        }
+    elif tuition_available > 0.0:
+        statuses["carryforwards"] = {
+            "status": "Review if applicable",
+            "why": "If current-year tuition is not fully used, this section helps position what gets claimed now versus carried forward.",
+            "note": "Current-year tuition is showing, so carryforward treatment may still matter.",
+        }
+
+    return statuses
+
+
+def render_step5_section_intro(section: dict[str, str]) -> None:
+    badge_styles = {
+        "Already active": {"bg": "rgba(38, 137, 83, 0.18)", "fg": "#9EE6BE", "border": "rgba(38, 137, 83, 0.28)"},
+        "Looks underused": {"bg": "rgba(94, 166, 255, 0.16)", "fg": "#D8E9FF", "border": "rgba(94, 166, 255, 0.28)"},
+        "Probably skip": {"bg": "rgba(143, 168, 198, 0.12)", "fg": "#B8C7D9", "border": "rgba(143, 168, 198, 0.18)"},
+        "Review if applicable": {"bg": "rgba(192, 144, 60, 0.16)", "fg": "#F0D8A3", "border": "rgba(192, 144, 60, 0.24)"},
+    }
+    style = badge_styles.get(section["status"], badge_styles["Review if applicable"])
+    st.markdown(
+        (
+            "<div style='border:1px solid rgba(255,255,255,0.08);border-radius:14px;"
+            "padding:12px 14px;margin:8px 0 14px 0;background:#101826;'>"
+            "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;'>"
+            f"<span style='display:inline-block;padding:4px 10px;border-radius:999px;background:{style['bg']};"
+            f"color:{style['fg']};border:1px solid {style['border']};font-size:0.74rem;font-weight:700;"
+            f"letter-spacing:0.04em;text-transform:uppercase;'>{section['status']}</span>"
+            "</div>"
+            f"<div style='color:#D9E3F0;font-size:0.93rem;line-height:1.55;margin-bottom:6px;'><strong>Why this matters now:</strong> {section['why']}</div>"
+            f"<div style='color:#9FB2C9;font-size:0.90rem;line-height:1.5;'>{section['note']}</div>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def summarize_carryforward_records(records: list[dict[str, object]]) -> tuple[float, float, float]:
+    total_available = 0.0
+    total_requested = 0.0
+    total_used = 0.0
+    for row in records:
+        available = float(row.get("available_amount", 0.0) or 0.0)
+        requested = float(row.get("claim_amount", 0.0) or 0.0)
+        used = min(available, requested)
+        total_available += available
+        total_requested += requested
+        total_used += used
+    return total_available, total_requested, total_used
+
+
+def render_carryforward_mini_worksheet(title: str, records: list[dict[str, object]]) -> None:
+    available, requested, used = summarize_carryforward_records(records)
+    unused = max(0.0, available - used)
+    st.markdown(f"**{title} Worksheet Snapshot**")
+    render_metric_row(
+        [
+            ("Available", available),
+            ("Requested", requested),
+            ("Used", used),
+            ("Unused", unused),
+        ],
+        4,
+    )
+    if records:
+        worksheet_df = build_currency_df(
+            [
+                {
+                    "Tax Year": row.get("tax_year", ""),
+                    "Available": float(row.get("available_amount", 0.0) or 0.0),
+                    "Requested": float(row.get("claim_amount", 0.0) or 0.0),
+                    "Used": min(float(row.get("available_amount", 0.0) or 0.0), float(row.get("claim_amount", 0.0) or 0.0)),
+                }
+                for row in records
+            ],
+            ["Available", "Requested", "Used"],
+        )
+        st.dataframe(worksheet_df, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No carryforward rows are entered yet.")
 
 
 def build_advisor_summary_sections(
@@ -1433,7 +1543,7 @@ def build_advisor_summary_sections(
     ]
 
 
-def build_advisor_summary_lead(result: dict) -> str:
+def build_advisor_summary_lead(result: dict, *, include_outcome: bool = True) -> str:
     refund_amount = float(result.get("line_48400_refund", 0.0))
     balance_owing_amount = float(result.get("line_48500_balance_owing", 0.0))
     deductions = float(result.get("total_deductions", 0.0))
@@ -1457,22 +1567,281 @@ def build_advisor_summary_lead(result: dict) -> str:
 
     if drivers:
         driver_text = ", ".join(drivers[:-1]) + (f", and {drivers[-1]}" if len(drivers) > 1 else drivers[0])
-        return (
-            f"{outcome} The current position appears to be driven mainly by {driver_text}. The notes below highlight where the file may still move or need support."
+        body = (
+            f"The current position appears to be driven mainly by {driver_text}. "
+            "The notes below highlight where the file may still move or need support."
         )
-    return (
-        f"{outcome} The next check is whether all available deductions, credits, and household positions have actually been worked through."
+    else:
+        body = (
+            "The next check is whether all available deductions, credits, and household positions "
+            "have actually been worked through."
+        )
+
+    return f"{outcome} {body}" if include_outcome else body
+
+
+def build_return_memo_html(result: dict) -> str:
+    memo_text = build_advisor_summary_lead(result, include_outcome=True)
+    highlight_style = (
+        "display:inline-block;padding:1px 8px 2px 8px;border-radius:999px;"
+        "background:rgba(94, 166, 255, 0.14);border:1px solid rgba(94, 166, 255, 0.22);"
+        "color:#F2F7FF;font-weight:700;letter-spacing:0.01em;"
     )
+
+    if result.get("line_48400_refund", 0.0) > 0:
+        amount_text = format_currency(result["line_48400_refund"])
+        memo_text = memo_text.replace(amount_text, f"<span style='{highlight_style}'>{amount_text}</span>", 1)
+    elif result.get("line_48500_balance_owing", 0.0) > 0:
+        amount_text = format_currency(result["line_48500_balance_owing"])
+        memo_text = memo_text.replace(amount_text, f"<span style='{highlight_style}'>{amount_text}</span>", 1)
+
+    return memo_text
+
+
+def format_result_outcome_chip(result: dict) -> str:
+    refund_amount = float(result.get("line_48400_refund", 0.0))
+    balance_owing_amount = float(result.get("line_48500_balance_owing", 0.0))
+    if refund_amount > 0:
+        return f"Refund {format_currency(refund_amount)}"
+    if balance_owing_amount > 0:
+        return f"Balance owing {format_currency(balance_owing_amount)}"
+    return "Near break-even"
+
+
+def scenario_improvement_value(current_result: dict, scenario_result: dict) -> float:
+    current_refund = float(current_result.get("line_48400_refund", 0.0))
+    current_balance = float(current_result.get("line_48500_balance_owing", 0.0))
+    scenario_refund = float(scenario_result.get("line_48400_refund", 0.0))
+    scenario_balance = float(scenario_result.get("line_48500_balance_owing", 0.0))
+    return (scenario_refund - current_refund) + (current_balance - scenario_balance)
+
+
+def format_scenario_delta(current_result: dict, scenario_result: dict) -> str:
+    delta = scenario_improvement_value(current_result, scenario_result)
+    if abs(delta) < 0.005:
+        return "No meaningful change"
+    if delta > 0:
+        if float(current_result.get("line_48500_balance_owing", 0.0)) > 0 or float(scenario_result.get("line_48500_balance_owing", 0.0)) > 0:
+            return f"Improves by about {format_currency(delta)}"
+        return f"Increases refund by about {format_currency(delta)}"
+    if float(current_result.get("line_48400_refund", 0.0)) > 0:
+        return f"Reduces refund by about {format_currency(abs(delta))}"
+    return f"Worsens by about {format_currency(abs(delta))}"
+
+
+def build_advisor_summary_scenarios(current_result: dict, calculation_inputs: dict | None) -> list[dict[str, str]]:
+    cards: list[dict[str, str]] = [
+        {
+            "title": "Current Return",
+            "outcome": format_result_outcome_chip(current_result),
+            "delta": "Current filed position",
+            "note": "Based on the inputs currently entered.",
+        }
+    ]
+    if not calculation_inputs:
+        return cards + [
+            {
+                "title": "With spouse amount",
+                "outcome": "No clear additional benefit",
+                "delta": "No clear additional benefit on current facts",
+                "note": "Add spouse facts first if you want to compare this scenario.",
+            },
+            {
+                "title": "With tuition review",
+                "outcome": "No clear additional benefit",
+                "delta": "No clear additional benefit on current facts",
+                "note": "Add tuition, carryforward, or student-loan inputs first if you want to compare this scenario.",
+            },
+            {
+                "title": "With deduction cleanup",
+                "outcome": "No clear additional benefit",
+                "delta": "No clear additional benefit on current facts",
+                "note": "Add deduction signals first if you want to compare this scenario.",
+            },
+        ]
+
+    scenario_map: dict[str, dict[str, str]] = {}
+
+    def set_default_scenario(title: str, note: str) -> None:
+        scenario_map[title] = {
+            "title": title,
+            "outcome": "No clear additional benefit",
+            "delta": "No clear additional benefit on current facts",
+            "note": note,
+        }
+
+    def try_add_scenario(title: str, note: str, updates: dict[str, float | bool]) -> None:
+        scenario_inputs = dict(calculation_inputs)
+        scenario_inputs.update(updates)
+        scenario_result = calculate_personal_tax_return(scenario_inputs)
+        scenario_map[title] = {
+            "title": title,
+            "outcome": format_result_outcome_chip(scenario_result),
+            "delta": format_scenario_delta(current_result, scenario_result),
+            "note": note,
+        }
+
+    spouse_net_income = float(calculation_inputs.get("spouse_net_income", 0.0))
+    set_default_scenario(
+        "With spouse amount",
+        "No spouse review opportunity is standing out yet from the current facts entered.",
+    )
+    if (
+        bool(calculation_inputs.get("has_spouse_end_of_year", False))
+        and (
+            float(current_result.get("line_30300", 0.0)) <= 0.0
+            or spouse_net_income < PLANNING_PRIORITY_THRESHOLDS["spouse_low_income_upper"]
+        )
+    ):
+        try_add_scenario(
+            "With spouse amount",
+            "Assumes spouse amount review is completed using the spouse facts already entered.",
+            {
+                "spouse_claim_enabled": True,
+                "spouse_amount_claim": 0.0,
+            },
+        )
+
+    current_year_tuition_available = float(current_result.get("schedule11_current_year_tuition_available", 0.0))
+    tuition_carryforward_available = float(current_result.get("schedule11_carryforward_available", 0.0))
+    current_year_requested = float(calculation_inputs.get("schedule11_current_year_claim_requested", 0.0))
+    carryforward_requested = float(calculation_inputs.get("schedule11_carryforward_claim_requested", 0.0))
+    set_default_scenario(
+        "With tuition review",
+        "No material tuition, carryforward, or student-loan review signal is standing out yet.",
+    )
+    if (
+        current_year_tuition_available > 0.0
+        or tuition_carryforward_available > 0.0
+        or float(calculation_inputs.get("student_loan_interest", 0.0)) > 0.0
+    ):
+        try_add_scenario(
+            "With tuition review",
+            "Assumes available tuition and carryforward amounts are fully reviewed and positioned.",
+            {
+                "tuition_amount_claim": current_year_tuition_available,
+                "schedule11_current_year_claim_requested": current_year_tuition_available,
+                "schedule11_carryforward_claim_requested": tuition_carryforward_available,
+            },
+        )
+
+    balance_owing = float(current_result.get("line_48500_balance_owing", 0.0))
+    employment_income = float(calculation_inputs.get("employment_income", 0.0))
+    deduction_candidates = [
+        {
+            "key": "rrsp_deduction",
+            "label": "RRSP deduction review",
+            "note_template": "Assumes about {amount} of additional RRSP deduction becomes supportable after a final review.",
+            "priority": 1,
+        },
+        {
+            "key": "fhsa_deduction",
+            "label": "FHSA deduction review",
+            "note_template": "Assumes about {amount} of additional FHSA deduction becomes supportable after a final review.",
+            "priority": 2,
+        },
+        {
+            "key": "child_care_expenses",
+            "label": "child care review",
+            "note_template": "Assumes about {amount} of additional child care expenses become supportable after a final review.",
+            "priority": 3,
+        },
+        {
+            "key": "moving_expenses",
+            "label": "moving-expense review",
+            "note_template": "Assumes about {amount} of additional moving expenses become supportable after a final review.",
+            "priority": 4,
+        },
+        {
+            "key": "support_payments_deduction",
+            "label": "support-deduction review",
+            "note_template": "Assumes about {amount} of additional support deduction becomes supportable after a final review.",
+            "priority": 5,
+        },
+        {
+            "key": "carrying_charges",
+            "label": "carrying-charge review",
+            "note_template": "Assumes about {amount} of additional carrying charges become supportable after a final review.",
+            "priority": 6,
+        },
+        {
+            "key": "other_employment_expenses",
+            "label": "employment-expense review",
+            "note_template": "Assumes about {amount} of additional employment expenses become supportable after a final review.",
+            "priority": 7,
+        },
+        {
+            "key": "other_deductions",
+            "label": "other deduction review",
+            "note_template": "Assumes about {amount} of additional deductions become supportable after a final review.",
+            "priority": 8,
+        },
+    ]
+    total_deductions = sum(float(calculation_inputs.get(item["key"], 0.0)) for item in deduction_candidates)
+    set_default_scenario(
+        "With deduction cleanup",
+        "No strong deduction-cleanup opportunity is standing out yet from the current inputs.",
+    )
+    if (balance_owing > 0.0 or (employment_income > 0.0 and total_deductions < max(2500.0, employment_income * 0.06))) and employment_income > 0.0:
+        cleanup_amount = min(3000.0, max(1000.0, employment_income * 0.03))
+        populated_candidates = [
+            item for item in deduction_candidates if float(calculation_inputs.get(item["key"], 0.0)) > 0.0
+        ]
+        if populated_candidates:
+            selected_candidate = sorted(
+                populated_candidates,
+                key=lambda item: (-float(calculation_inputs.get(item["key"], 0.0)), item["priority"]),
+            )[0]
+        else:
+            selected_candidate = deduction_candidates[0]
+        try_add_scenario(
+            "With deduction cleanup",
+            selected_candidate["note_template"].format(amount=format_currency(cleanup_amount)),
+            {
+                selected_candidate["key"]: float(calculation_inputs.get(selected_candidate["key"], 0.0)) + cleanup_amount,
+            },
+        )
+
+    cards.extend(
+        [
+            scenario_map["With spouse amount"],
+            scenario_map["With tuition review"],
+            scenario_map["With deduction cleanup"],
+        ]
+    )
+    return cards[:4]
+
+
+def render_advisor_scenario_compare(current_result: dict, calculation_inputs: dict | None) -> None:
+    scenario_cards = build_advisor_summary_scenarios(current_result, calculation_inputs)
+    with st.container():
+        st.markdown("##### Scenario Compare")
+        columns = st.columns(len(scenario_cards))
+        for column, card in zip(columns, scenario_cards):
+            with column:
+                st.markdown(
+                    (
+                        "<div style='background:#101826;border:1px solid rgba(255,255,255,0.08);"
+                        "border-radius:16px;padding:14px 15px 15px 15px;min-height:178px;margin:0 0 14px 0;'>"
+                        f"<div style='font-size:0.78rem;letter-spacing:0.06em;text-transform:uppercase;color:#8FA8C6;font-weight:700;margin-bottom:8px;'>{card['title']}</div>"
+                        f"<div style='color:#F2F7FF;font-weight:700;font-size:1.02rem;line-height:1.4;margin-bottom:8px;'>{card['outcome']}</div>"
+                        f"<div style='display:inline-block;padding:4px 10px;border-radius:999px;background:rgba(94, 166, 255, 0.12);"
+                        f"color:#D8E9FF;border:1px solid rgba(94, 166, 255, 0.18);font-size:0.78rem;font-weight:700;margin-bottom:10px;'>{card['delta']}</div>"
+                        f"<div style='color:#B9C7D8;line-height:1.55;font-size:0.90rem;'>{card['note']}</div>"
+                        "</div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
 
 def render_advisor_summary(
     result: dict,
     readiness_df: pd.DataFrame,
     suggestions: "list[SuggestionItem] | None" = None,
+    calculation_inputs: dict | None = None,
 ) -> None:
     sections = build_advisor_summary_sections(result, readiness_df, suggestions)
-    lead_text = build_advisor_summary_lead(result)
-    shell_bg = "#0D1522"
     border = "rgba(255,255,255,0.08)"
     body_color = "#D9E3F0"
     label_color = "#8FA8C6"
@@ -1509,17 +1878,12 @@ def render_advisor_summary(
 
     with st.container(border=True):
         st.markdown("##### Advisor Summary")
-        st.markdown(
-            (
-                f"<div style='background:{shell_bg};border:1px solid {border};border-radius:18px;"
-                f"padding:16px 20px;margin:2px 0 14px 0;'>"
-                f"<div style='font-size:0.78rem;letter-spacing:0.08em;text-transform:uppercase;color:{label_color};font-weight:700;margin-bottom:8px;'>Return Memo</div>"
-                f"<div style='color:{body_color};line-height:1.65;font-size:0.95rem;'>{lead_text}</div>"
-                f"</div>"
-            ),
-            unsafe_allow_html=True,
+        results_render_advisor_scenario_compare(
+            result,
+            calculation_inputs,
+            calculate_personal_tax_return=calculate_personal_tax_return,
+            format_currency=format_currency,
         )
-
         columns = st.columns([1.02, 1.04, 1.0], gap="medium")
         for index, (column, (title, items)) in enumerate(zip(columns, sections)):
             with column:
@@ -1584,105 +1948,32 @@ def render_advisor_summary(
                     ),
                     unsafe_allow_html=True,
                 )
-
-
-def render_suggestion_cards(suggestions: "list[SuggestionItem]") -> None:
-    if not suggestions:
-        return
-
-    def classify_suggestion(item: "SuggestionItem") -> tuple[str, str, str, str]:
-        label = item["label"]
-        reason = item["reason"]
-        where = item["where"]
-        combined = f"{label} {reason}".lower()
-        if "outside this estimator" in where.lower():
-            return (
-                "Outside This Estimator",
-                "Outside Scope",
-                "#8A5315",
-                "#181F2E",
-            )
-        if any(token in combined for token in ["already been included", "included in your current estimate", "active (preview"]):
-            return (
-                "Already Reflected In This Estimate",
-                "Already Reflected",
-                "#1E8E53",
-                "#141C2C",
-            )
-        return (
-            "Potential Tax Review Opportunities",
-            "Review Opportunity",
-            "#2E6FDC",
-            "#141C2C",
-        )
-
-    grouped_items: dict[str, list[tuple[SuggestionItem, str, str, str]]] = {
-        "Already Reflected In This Estimate": [],
-        "Potential Tax Review Opportunities": [],
-        "Outside This Estimator": [],
-    }
-    for item in suggestions:
-        group_label, pill_label, pill_color, card_bg = classify_suggestion(item)
-        grouped_items[group_label].append((item, pill_label, pill_color, card_bg))
-
-    with st.container(border=True):
-        st.markdown("##### Tax Review Notes")
-        st.caption(
-            "These notes are meant to highlight areas that may still change the estimate, deserve a second look, "
-            "or should be reviewed outside this estimator before you rely on the result."
-        )
-        for group_name in [
-            "Potential Tax Review Opportunities",
-            "Already Reflected In This Estimate",
-            "Outside This Estimator",
-        ]:
-            group_items = grouped_items[group_name]
-            if not group_items:
-                continue
-            st.markdown(f"**{group_name}**")
-            for item, pill_label, pill_color, card_bg in group_items:
-                with st.container():
-                    st.markdown(
-                        (
-                            f"<div style='background:{card_bg};border:1px solid rgba(255,255,255,0.08);"
-                            f"border-radius:16px;padding:18px 18px 16px 18px;margin:10px 0 12px 0;'>"
-                            f"<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;'>"
-                            f"<span style='display:inline-block;padding:5px 12px;border-radius:999px;"
-                            f"background:{pill_color};color:white;font-weight:700;font-size:0.80rem;line-height:1.2;'>{pill_label}</span>"
-                            f"<span style='font-weight:700;font-size:1.04rem;color:#FFFFFF;'>{item['label']}</span>"
-                            f"</div>"
-                            f"<div style='margin:0 0 8px 0;color:#E8EDF7;line-height:1.6;'><strong>Why this may matter:</strong> {item['reason']}</div>"
-                            f"<div style='margin:0;color:#E8EDF7;line-height:1.6;'><strong>Where to review:</strong> {item['where']}</div>"
-                            f"</div>"
-                        ),
-                        unsafe_allow_html=True,
-                    )
-
-
 def render_answer_summary_sheet(
     result: dict,
     province_name: str,
     readiness_df: pd.DataFrame,
     suggestions: "list[SuggestionItem] | None" = None,
+    calculation_inputs: dict | None = None,
 ) -> None:
     ready_count = int((readiness_df["Status"] == "Ready").sum()) if not readiness_df.empty else 0
     review_count = int((readiness_df["Status"] == "Review").sum()) if not readiness_df.empty else 0
     missing_count = int((readiness_df["Status"] == "Missing").sum()) if not readiness_df.empty else 0
+    return_memo_text = results_build_return_memo_html(result, format_currency=format_currency)
+    memo_shell_bg = "#0D1522"
+    memo_border = "rgba(255,255,255,0.08)"
+    memo_label_color = "#8FA8C6"
+    memo_body_color = "#D9E3F0"
 
-    if result.get("line_48400_refund", 0.0) > 0:
-        st.success(
-            f"Estimated refund: {format_currency(result['line_48400_refund'])}. "
-            "Based on the slips, deductions, credits, and payments entered so far."
-        )
-    elif result.get("line_48500_balance_owing", 0.0) > 0:
-        st.warning(
-            f"Estimated balance owing: {format_currency(result['line_48500_balance_owing'])}. "
-            "Total tax payable is currently higher than withholding and other payments entered."
-        )
-    else:
-        st.info(
-            "Estimated result: near break-even. Small input changes could still move the file to either a refund or a balance owing."
-        )
+    st.markdown(
+        (
+            f"<div style='background:{memo_shell_bg};border:1px solid {memo_border};border-radius:18px;"
+            f"padding:16px 20px;margin:2px 0 14px 0;'>"
+            f"<div style='font-size:0.78rem;letter-spacing:0.08em;text-transform:uppercase;color:{memo_label_color};font-weight:700;margin-bottom:8px;'>Return Memo</div>"
+            f"<div style='color:{memo_body_color};line-height:1.65;font-size:0.95rem;'>{return_memo_text}</div>"
+            f"</div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
     render_metric_row(
         [
@@ -1695,9 +1986,13 @@ def render_answer_summary_sheet(
     )
     st.caption(f"Filing snapshot: Ready {ready_count}, Review {review_count}, Missing {missing_count}.")
     if suggestions:
-        render_tax_optimization_panel(result, suggestions)
-        render_result_driver_panel(result)
-        render_advisor_summary(result, readiness_df, suggestions)
+        results_render_tax_optimization_panel(result, suggestions, format_currency=format_currency)
+    results_render_advisor_scenario_compare(
+        result,
+        calculation_inputs,
+        calculate_personal_tax_return=calculate_personal_tax_return,
+        format_currency=format_currency,
+    )
 
 
 def render_flow_stepper(current_step: int) -> None:
@@ -2181,102 +2476,6 @@ def render_advanced_technical_details(
                 - Refund or balance owing = income tax withheld + instalments + refundable credits + other payments - total income tax payable.
                 """
             )
-
-
-def render_household_review_panel(result: dict) -> None:
-    status_styles = {
-        "Allowed": {"bg": "#14532d", "fg": "#bbf7d0"},
-        "Blocked": {"bg": "#7f1d1d", "fg": "#fecaca"},
-    }
-    household_rows = [
-        {
-            "claim": "Spouse amount",
-            "status": "Allowed" if result.get("household_spouse_allowed", 0.0) else "Blocked",
-            "requested": result.get("manual_spouse_claim", 0.0),
-            "used": result.get("effective_spouse_claim", 0.0),
-            "reason": result.get("household_spouse_reason", ""),
-        },
-        {
-            "claim": "Eligible dependant amount",
-            "status": "Allowed" if result.get("household_eligible_dependant_allowed", 0.0) else "Blocked",
-            "requested": result.get("manual_eligible_dependant_claim", 0.0),
-            "used": result.get("effective_eligible_dependant_claim", 0.0),
-            "reason": result.get("household_eligible_dependant_reason", ""),
-        },
-        {
-            "claim": "Caregiver amount",
-            "status": "Allowed" if result.get("household_caregiver_allowed", 0.0) else "Blocked",
-            "requested": result.get("requested_caregiver_claim", 0.0),
-            "available": result.get("available_caregiver_claim", 0.0),
-            "used": result.get("provincial_caregiver_claim_amount", 0.0),
-            "unused": result.get("unused_caregiver_claim", 0.0),
-            "reason": result.get("household_caregiver_reason", ""),
-        },
-        {
-            "claim": "Disability transfer",
-            "status": "Allowed" if result.get("household_disability_transfer_allowed", 0.0) else "Blocked",
-            "requested": result.get("requested_disability_transfer", 0.0),
-            "available": result.get("available_disability_transfer", 0.0),
-            "used": result.get("household_disability_transfer_used", 0.0),
-            "unused": result.get("unused_disability_transfer", 0.0),
-            "reason": result.get("household_disability_transfer_reason", ""),
-        },
-        {
-            "claim": "Medical for dependants",
-            "status": "Allowed" if result.get("household_medical_dependants_allowed", 0.0) else "Blocked",
-            "requested": result.get("requested_medical_dependants", 0.0),
-            "available": result.get("available_medical_dependants", 0.0),
-            "used": result.get("household_medical_dependants_used", 0.0),
-            "unused": result.get("unused_medical_dependants", 0.0),
-            "reason": result.get("household_medical_dependants_reason", ""),
-        },
-    ]
-    render_metric_row(
-        [
-            ("Allowed", float(sum(1 for row in household_rows if row["status"] == "Allowed"))),
-            ("Blocked", float(sum(1 for row in household_rows if row["status"] == "Blocked"))),
-        ],
-        2,
-    )
-    for row in household_rows:
-        style = status_styles[row["status"]]
-        st.markdown(
-            f"""
-            <div style="border:1px solid #2a2f3a;border-radius:12px;padding:12px 14px;margin:8px 0;background:#111827;">
-                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
-                    <span style="background:{style['bg']};color:{style['fg']};padding:3px 10px;border-radius:999px;font-size:0.8rem;font-weight:600;">{row['status']}</span>
-                    <span style="color:#f9fafb;font-weight:600;">{row['claim']}</span>
-                </div>
-                <div style="color:#d1d5db;line-height:1.5;">
-                    Requested: {format_currency(row['requested'])}<br>
-                    Available: {format_currency(row.get('available', row['requested']))}<br>
-                    Used: {format_currency(row['used'])}<br>
-                    Unused: {format_currency(row.get('unused', 0.0))}<br>
-                    {row['reason']}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    allocation_trace = build_currency_df(
-        [
-            {"Step": "1", "Flow": "Spouse amount", "Requested": result.get("manual_spouse_claim", 0.0), "Used": result.get("effective_spouse_claim", 0.0)},
-            {"Step": "2", "Flow": "Eligible dependant", "Requested": result.get("manual_eligible_dependant_claim", 0.0), "Used": result.get("effective_eligible_dependant_claim", 0.0)},
-            {"Step": "3", "Flow": "Caregiver pool", "Requested": result.get("requested_caregiver_claim", 0.0), "Used": result.get("provincial_caregiver_claim_amount", 0.0)},
-            {"Step": "4", "Flow": "Disability transfer", "Requested": result.get("requested_disability_transfer", 0.0), "Used": result.get("household_disability_transfer_used", 0.0)},
-            {"Step": "5", "Flow": "Dependant medical", "Requested": result.get("requested_medical_dependants", 0.0), "Used": result.get("household_medical_dependants_used", 0.0)},
-        ],
-        ["Requested", "Used"],
-    )
-    st.markdown("#### Household Allocation Trace")
-    st.dataframe(allocation_trace, use_container_width=True, hide_index=True)
-    if result.get("additional_dependant_count", 0.0):
-        st.caption(
-            f"Additional dependants in pool: {int(result.get('additional_dependant_count', 0.0))}. "
-            f"Additional caregiver pool: {format_currency(result.get('additional_dependant_caregiver_claim_total', 0.0))}. "
-            f"Additional disability transfer pool: {format_currency(result.get('additional_dependant_disability_transfer_available_total', 0.0))}. "
-            f"Additional medical pool: {format_currency(result.get('additional_dependant_medical_claim_total', 0.0))}."
-        )
 
 
 def empty_rows(columns: list[str], rows: int = 3) -> list[dict]:
@@ -3460,8 +3659,8 @@ union_dues += float(t4_wizard_totals.get("box44_union_dues", 0.0))
 if current_step == 5:
     st.markdown("### 5) Credits, Carryforwards, and Special Cases")
     st.caption("Most users only need one or two parts of this section. Start with the common items first and leave the rest alone unless a slip, receipt, or worksheet clearly points you there.")
-    render_step5_optimization_checkpoint(
-        build_step5_optimization_preview(
+    step5_render_optimization_checkpoint(
+        step5_build_optimization_preview(
             session_state=st.session_state,
             t2202_wizard_totals=t2202_wizard_totals,
             t4_wizard_totals=t4_wizard_totals,
@@ -3479,13 +3678,20 @@ if current_step == 5:
             ),
             balance_owing_preview=0.0,
         ),
-        build_step5_checkpoint_suggestions(
+        step5_build_checkpoint_suggestions(
             session_state=st.session_state,
             t2202_wizard_totals=t2202_wizard_totals,
         ),
+        format_currency=format_currency,
+    )
+    step5_section_statuses = step5_build_section_statuses(
+        session_state=st.session_state,
+        t2202_wizard_totals=t2202_wizard_totals,
+        province_name=province_name,
     )
     with st.expander("Common Credits You Might Claim", expanded=False):
         st.caption("Should you open this? Yes if you paid tuition, student loan interest, medical expenses, or made donations. If none of these apply, you can usually skip this section.")
+        step5_render_section_intro(step5_section_statuses["common_credits"])
         spouse_amount_claim = number_input(
             "Manual spouse / common-law claim amount only if you are overriding the auto estimate",
             "spouse_amount_claim",
@@ -3537,12 +3743,13 @@ if current_step == 5:
         )
     with st.expander("Family and Household Questions", expanded=False):
         st.caption("Should you open this? Yes if spouse, children, other dependants, caregiver rules, support payments, or disability transfers may apply. If your return is only about your own slips and credits, you can usually skip it.")
+        step5_render_section_intro(step5_section_statuses["household"])
         household_tabs = st.tabs(["Your Situation", "Dependant Details", "Possible Claim Conflicts"])
         with household_tabs[0]:
             with st.container(border=True):
                 marital_col1, marital_col2 = st.columns(2)
                 spouse_claim_enabled = checkbox_input(
-                    "Do you want the estimator to check whether a spouse / common-law partner amount may apply?",
+                    "Should the app review whether spouse / common-law partner amount may apply?",
                     "spouse_claim_enabled",
                     container=marital_col1,
                 )
@@ -3579,7 +3786,7 @@ if current_step == 5:
                     "Manual only if needed. Enter the amount available to transfer before any claim is made.",
                 )
                 spouse_net_income = number_input(
-                    "Spouse / partner net income",
+                    "What was your spouse / partner's net income?",
                     "spouse_net_income",
                     100.0,
                     "Used to estimate the spouse amount if you are claiming it.",
@@ -3588,22 +3795,22 @@ if current_step == 5:
             with st.container(border=True):
                 dep_col1, dep_col2 = st.columns(2)
                 eligible_dependant_claim_enabled = checkbox_input(
-                    "Do you want the estimator to check whether an eligible dependant amount may apply?",
+                    "Should the app review whether an eligible dependant amount may apply?",
                     "eligible_dependant_claim_enabled",
                     container=dep_col1,
                 )
                 eligible_dependant_infirm = checkbox_input(
-                    "Is the dependant infirm?",
+                    "Is this dependant infirm?",
                     "eligible_dependant_infirm",
                     container=dep_col1,
                 )
                 dependant_lived_with_you = checkbox_input(
-                    "Did the dependant live with you?",
+                    "Did this dependant live with you?",
                     "dependant_lived_with_you",
                     container=dep_col1,
                 )
                 eligible_dependant_net_income = number_input(
-                    "Dependant net income",
+                    "What was this dependant's net income?",
                     "eligible_dependant_net_income",
                     100.0,
                     "Used to estimate the eligible dependant amount if you are claiming it.",
@@ -3645,12 +3852,12 @@ if current_step == 5:
                     container=restrict_col1,
                 )
                 shared_custody_claim_agreement = checkbox_input(
-                    "Is there a shared-custody claim agreement?",
+                    "Is there a shared-custody arrangement that affects who can claim this dependant?",
                     "shared_custody_claim_agreement",
                     container=restrict_col1,
                 )
                 another_household_member_claims_dependant = checkbox_input(
-                    "Is someone else in the household already claiming this dependant?",
+                    "Is someone else already claiming this dependant-related amount?",
                     "another_household_member_claims_dependant",
                     container=restrict_col1,
                 )
@@ -3665,7 +3872,7 @@ if current_step == 5:
                     container=restrict_col2,
                 )
                 medical_dependant_claim_shared = checkbox_input(
-                    "Is someone else sharing or claiming this dependant's medical expenses?",
+                    "Is someone else already sharing or claiming this dependant's medical expenses?",
                     "medical_dependant_claim_shared",
                     container=restrict_col2,
                 )
@@ -3729,6 +3936,7 @@ if current_step == 5:
         )
     with st.expander("Less Common or Manual Overrides", expanded=False):
         st.caption("Should you open this? Only if you already have a worksheet amount, need a manual override, or know a less common claim applies. If you are unsure, leave these fields alone.")
+        step5_render_section_intro(step5_section_statuses["manual_overrides"])
         disability_amount_claim = number_input(
             "Disability amount claim base",
             "disability_amount_claim",
@@ -3761,6 +3969,7 @@ if current_step == 5:
         )
     with st.expander("Refundable Credits and Income-Tested Support", expanded=False):
         st.caption("Should you open this? Only if lower-income support, CWB, training credit, medical expense supplement, or manual refundable credits may apply. If you are unsure, leave manual amounts at 0 and use the automatic estimate where available.")
+        step5_render_section_intro(step5_section_statuses["refundable"])
         refundable_col1, refundable_col2 = st.columns(2)
         canada_workers_benefit = number_input(
             "Canada Workers Benefit manual amount only if you are overriding the auto estimate",
@@ -3862,6 +4071,7 @@ if current_step == 5:
     st.session_state["persist_canada_workers_benefit"] = canada_workers_benefit
     with st.expander("Province-Specific Credits and Special Schedules", expanded=False):
         st.caption("Should you open this? Only if a provincial worksheet, province-specific credit, or special schedule applies to you. If not, leave this section alone.")
+        step5_render_section_intro(step5_section_statuses["province_special"])
         on_col1, on_col2, on_col3 = st.columns(3)
         ontario_caregiver_amount = on_col1.number_input(
             f"{province_name} Caregiver Claim Amount",
@@ -3930,6 +4140,7 @@ if current_step == 5:
 
     with st.expander("Foreign Income, Dividend Credits, and Manual Overrides", expanded=False):
         st.caption("Should you open this? Only if you have foreign income, foreign tax paid, or a dividend-credit amount that differs from the estimator. If your slips already cover everything, you can usually skip this.")
+        step5_render_section_intro(step5_section_statuses["foreign"])
         fd_col1, fd_col2 = st.columns(2)
         foreign_income = fd_col1.number_input(
             "Manual additional foreign income not already shown on slips",
@@ -4023,6 +4234,7 @@ if current_step == 5:
 
     with st.expander("Prior-Year Carryforwards and Transfers", expanded=False):
         st.caption("Should you open this? Only if you are bringing forward amounts from an earlier year or using a transfer. Quick guide: Available = what you still have, Requested = what you want to use this year, Used = what the estimator actually applies.")
+        step5_render_section_intro(step5_section_statuses["carryforwards"])
         carryforward_tabs = st.tabs(["Tuition Carryforward", "Donation Carryforward", f"{province_name} Additional Lines"])
         with carryforward_tabs[0]:
             tuition_cf_df = render_record_card_editor(
@@ -4035,6 +4247,12 @@ if current_step == 5:
                 ],
                 "Enter one row per prior year. Available = what remains from that year. Claim amount = what you want to use now. The estimator caps the used amount to what is actually available.",
             )
+            step5_render_carryforward_mini_worksheet(
+                "Tuition Carryforward",
+                tuition_cf_df.to_dict("records") if not tuition_cf_df.empty else [],
+                build_currency_df=build_currency_df,
+                render_metric_row=render_metric_row,
+            )
         with carryforward_tabs[1]:
             donation_cf_df = render_record_card_editor(
                 "Donation Carryforward by Year",
@@ -4045,6 +4263,12 @@ if current_step == 5:
                     {"id": "claim_amount", "label": "Claim Amount", "step": 100.0},
                 ],
                 "Enter one row per prior year. Available = what remains from that year. Claim amount = what you want to use now. The estimator applies the allowed amount through Schedule 9.",
+            )
+            step5_render_carryforward_mini_worksheet(
+                "Donation Carryforward",
+                donation_cf_df.to_dict("records") if not donation_cf_df.empty else [],
+                build_currency_df=build_currency_df,
+                render_metric_row=render_metric_row,
             )
         with carryforward_tabs[2]:
             provincial_credit_lines_df = render_record_card_editor(
@@ -4781,8 +5005,7 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
     result = st.session_state["tax_result"]
     postcalc_diagnostics = collect_postcalc_diagnostics(result)
     if current_step == 7:
-        st.success("Calculation complete. Results are shown below.")
-
+        pass
     st.subheader("Results")
     provincial_form_code = PROVINCIAL_FORM_CODES.get(province, "428")
     tab_names = ["Summary", "Return Details", "Advanced Checks", "Foreign Tax Credit", provincial_form_code, "Rental Details", "Capital Gains", "Tuition", "Donations", "Scope / Limits"]
@@ -4947,6 +5170,7 @@ if "tax_result" in st.session_state and st.session_state.get("tax_result_input_s
             province_name=province_name,
             readiness_df=readiness_df,
             suggestions=summary_suggestions,
+            calculation_inputs=calculation_inputs,
         )
         with st.expander("Client Review Details", expanded=False):
             st.markdown("#### Plain-Language Numbers")

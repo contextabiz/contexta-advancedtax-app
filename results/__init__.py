@@ -8,6 +8,12 @@ from .printable import (
     build_printable_client_summary_html,
     build_printable_client_summary_pdf,
 )
+from .summary_panels import (
+    build_advisor_summary_lead,
+    build_return_memo_html,
+    render_advisor_scenario_compare,
+    render_tax_optimization_panel,
+)
 from .reconciliation import (
     build_assumptions_overrides_df,
     build_missing_support_df,
@@ -39,6 +45,8 @@ __all__ = [
     "build_printable_client_summary_pdf",
     "build_provincial_worksheet_df",
     "build_return_package_df",
+    "build_advisor_summary_lead",
+    "build_return_memo_html",
     "build_schedule_11_df",
     "build_schedule_3_df",
     "build_slip_reconciliation_df",
@@ -46,4 +54,6 @@ __all__ = [
     "build_summary_df",
     "build_t776_df",
     "build_federal_net_tax_build_up_df",
+    "render_advisor_scenario_compare",
+    "render_tax_optimization_panel",
 ]
