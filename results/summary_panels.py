@@ -1,7 +1,7 @@
 import streamlit as st
 
-from planning_signals import build_planning_priority_context, planning_priority
-from ui_config import PLANNING_PRIORITY_THRESHOLDS, SCENARIO_DEDUCTION_CANDIDATES
+from tax_config import TAX_CONFIGS
+from ui_config import PLANNING_PRIORITY_THRESHOLDS
 
 
 def build_tax_optimization_items(
@@ -76,35 +76,6 @@ def build_tax_optimization_items(
 
     items.sort(key=lambda row: row[0])
     return [(title, body) for _, title, body in items[:3]]
-
-
-def build_tax_optimization_memo(
-    result: dict,
-    suggestions: list[dict] | None = None,
-    *,
-    format_currency,
-) -> tuple[str, list[tuple[str, str]]]:
-    items = build_tax_optimization_items(result, suggestions, format_currency=format_currency)
-    balance_owing = float(result.get("line_48500_balance_owing", 0.0))
-
-    if balance_owing > 0:
-        lead = "Preparer note: before treating the current balance owing as final, review the strongest remaining deduction, household, and carryforward positions first."
-    else:
-        lead = ""
-
-    return lead, items[:2]
-
-
-def render_tax_optimization_panel(result: dict, suggestions: list[dict] | None = None, *, format_currency) -> None:
-    lead, items = build_tax_optimization_memo(result, suggestions, format_currency=format_currency)
-    if not items and not lead:
-        return
-    with st.container(border=True):
-        st.markdown("##### Potential Tax Savings")
-        if lead:
-            st.caption(lead)
-        for heading, body in items:
-            st.markdown(f"- **{heading}**: {body}")
 
 
 def build_advisor_summary_lead(result: dict, *, format_currency, include_outcome: bool = True) -> str:
@@ -191,6 +162,66 @@ def format_scenario_delta(current_result: dict, scenario_result: dict, *, format
     if float(current_result.get("line_48400_refund", 0.0)) > 0:
         return f"Reduces refund by about {format_currency(abs(delta))}"
     return f"Worsens by about {format_currency(abs(delta))}"
+
+
+def get_current_bracket_index(taxable_income: float, brackets: list[tuple[float, float]]) -> int:
+    for index, (limit, _) in enumerate(brackets):
+        if taxable_income <= float(limit):
+            return index
+    return max(0, len(brackets) - 1)
+
+
+def build_bracket_drop_target(
+    *,
+    taxable_income: float,
+    tax_year: int,
+    province: str,
+) -> dict[str, float | str] | None:
+    config = TAX_CONFIGS.get(tax_year)
+    province_code = str(province or "").upper()
+    if not config or province_code not in config.get("provincial", {}):
+        return None
+    if taxable_income <= 0:
+        return None
+
+    federal_brackets = list(config["federal_brackets"])
+    provincial_config = config["provincial"][province_code]
+    provincial_brackets = list(provincial_config["brackets"])
+    candidates: list[dict[str, float | str]] = []
+
+    federal_index = get_current_bracket_index(taxable_income, federal_brackets)
+    if federal_index > 0:
+        previous_limit = float(federal_brackets[federal_index - 1][0])
+        candidates.append(
+            {
+                "scope": "federal",
+                "label": "federal bracket",
+                "amount_needed": max(0.0, taxable_income - previous_limit),
+            }
+        )
+
+    provincial_index = get_current_bracket_index(taxable_income, provincial_brackets)
+    if provincial_index > 0:
+        previous_limit = float(provincial_brackets[provincial_index - 1][0])
+        candidates.append(
+            {
+                "scope": "provincial",
+                "label": f"{provincial_config['name']} bracket",
+                "amount_needed": max(0.0, taxable_income - previous_limit),
+            }
+        )
+
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: float(item["amount_needed"]))[0]
+
+
+def choose_bracket_drop_deduction_key(calculation_inputs: dict) -> tuple[str, str]:
+    rrsp_deduction = float(calculation_inputs.get("rrsp_deduction", 0.0))
+    fhsa_deduction = float(calculation_inputs.get("fhsa_deduction", 0.0))
+    if fhsa_deduction > rrsp_deduction:
+        return "fhsa_deduction", "FHSA"
+    return "rrsp_deduction", "RRSP"
 
 
 def build_advisor_summary_scenarios(
@@ -294,37 +325,37 @@ def build_advisor_summary_scenarios(
         )
 
     balance_owing = float(current_result.get("line_48500_balance_owing", 0.0))
-    employment_income = float(calculation_inputs.get("employment_income", 0.0))
-    total_deductions = sum(float(calculation_inputs.get(item["key"], 0.0)) for item in SCENARIO_DEDUCTION_CANDIDATES)
+    taxable_income = float(current_result.get("taxable_income", 0.0))
+    tax_year = int(calculation_inputs.get("tax_year", 2025) or 2025)
+    province = str(calculation_inputs.get("province", "ON") or "ON")
     set_default_scenario(
         "With deduction cleanup",
-        "No strong deduction-cleanup opportunity is standing out yet from the current inputs.",
+        "No RRSP or FHSA bracket-step opportunity is standing out yet from the current inputs.",
     )
-    if (balance_owing > 0.0 or (employment_income > 0.0 and total_deductions < max(2500.0, employment_income * 0.06))) and employment_income > 0.0:
-        cleanup_amount = min(3000.0, max(1000.0, employment_income * 0.03))
-        populated_candidates = [
-            item for item in SCENARIO_DEDUCTION_CANDIDATES if float(calculation_inputs.get(item["key"], 0.0)) > 0.0
-        ]
-        if populated_candidates:
-            selected_candidate = sorted(
-                populated_candidates,
-                key=lambda item: (-float(calculation_inputs.get(item["key"], 0.0)), item["priority"]),
-            )[0]
-        else:
-            selected_candidate = SCENARIO_DEDUCTION_CANDIDATES[0]
+    bracket_drop_target = build_bracket_drop_target(
+        taxable_income=taxable_income,
+        tax_year=tax_year,
+        province=province,
+    )
+    if balance_owing > 0.0 and bracket_drop_target is not None and float(bracket_drop_target["amount_needed"]) > 0.0:
+        deduction_key, deduction_label = choose_bracket_drop_deduction_key(calculation_inputs)
+        contribution_needed = float(bracket_drop_target["amount_needed"])
         try_add_scenario(
             "With deduction cleanup",
-            selected_candidate["note_template"].format(amount=format_currency(cleanup_amount)),
+            (
+                f"Assumes about {format_currency(contribution_needed)} of additional {deduction_label} contribution, "
+                f"claimed as a deduction, to bring taxable income down into the next lower {bracket_drop_target['label']}."
+            ),
             {
-                selected_candidate["key"]: float(calculation_inputs.get(selected_candidate["key"], 0.0)) + cleanup_amount,
+                deduction_key: float(calculation_inputs.get(deduction_key, 0.0)) + contribution_needed,
             },
         )
 
     cards.extend(
         [
+            scenario_map["With deduction cleanup"],
             scenario_map["With spouse amount"],
             scenario_map["With tuition review"],
-            scenario_map["With deduction cleanup"],
         ]
     )
     return cards[:4]
@@ -345,6 +376,7 @@ def render_advisor_scenario_compare(
     )
     with st.container():
         st.markdown("##### Scenario Compare")
+        st.caption("RRSP/FHSA scenario is subject to available contribution room and supportable deduction limits.")
         columns = st.columns(len(scenario_cards))
         for column, card in zip(columns, scenario_cards):
             with column:

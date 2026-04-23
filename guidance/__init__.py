@@ -18,6 +18,7 @@ from .step5_helpers import (
     render_carryforward_mini_worksheet,
     render_step5_optimization_checkpoint,
     render_step5_section_intro,
+    render_step5_why_card,
 )
 from .suggestions import SuggestionItem, build_suggestions
 
@@ -41,5 +42,6 @@ __all__ = [
     "render_carryforward_mini_worksheet",
     "render_step5_optimization_checkpoint",
     "render_step5_section_intro",
+    "render_step5_why_card",
     "split_guidance_by_priority",
 ]

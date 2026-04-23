@@ -243,17 +243,38 @@ def build_step5_section_statuses(
 
 def render_step5_section_intro(section: dict[str, str]) -> None:
     style = STEP5_STATUS_BADGE_STYLES.get(section["status"], STEP5_STATUS_BADGE_STYLES["Review if applicable"])
+    status_html = ""
+    if section["status"] != "Probably skip":
+        status_html = (
+            f"<span style='display:inline-block;padding:4px 10px;border-radius:999px;background:{style['bg']};"
+            f"color:{style['fg']};border:1px solid {style['border']};font-size:0.74rem;font-weight:700;"
+            f"letter-spacing:0.04em;text-transform:uppercase;'>{section['status']}</span>"
+        )
     st.markdown(
         (
             "<div style='border:1px solid rgba(255,255,255,0.08);border-radius:14px;"
             "padding:12px 14px;margin:8px 0 14px 0;background:#101826;'>"
             "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;'>"
-            f"<span style='display:inline-block;padding:4px 10px;border-radius:999px;background:{style['bg']};"
-            f"color:{style['fg']};border:1px solid {style['border']};font-size:0.74rem;font-weight:700;"
-            f"letter-spacing:0.04em;text-transform:uppercase;'>{section['status']}</span>"
+            f"{status_html}"
             "</div>"
-            f"<div style='color:#D9E3F0;font-size:0.93rem;line-height:1.55;margin-bottom:6px;'><strong>Why this matters now:</strong> {section['why']}</div>"
+            f"<div style='color:#D9E3F0;font-size:0.93rem;line-height:1.55;margin-bottom:6px;'><strong>Why this matters:</strong> {section['why']}</div>"
             f"<div style='color:#9FB2C9;font-size:0.90rem;line-height:1.5;'>{section['note']}</div>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def render_step5_why_card(why: str, note: str = "") -> None:
+    note_html = ""
+    if note:
+        note_html = f"<div style='color:#9FB2C9;font-size:0.90rem;line-height:1.5;'>{note}</div>"
+    st.markdown(
+        (
+            "<div style='border:1px solid rgba(255,255,255,0.08);border-radius:14px;"
+            "padding:12px 14px;margin:8px 0 14px 0;background:#101826;'>"
+            f"<div style='color:#D9E3F0;font-size:0.93rem;line-height:1.55;margin-bottom:6px;'><strong>Why this matters:</strong> {why}</div>"
+            f"{note_html}"
             "</div>"
         ),
         unsafe_allow_html=True,

@@ -12,7 +12,6 @@ from .summary_panels import (
     build_advisor_summary_lead,
     build_return_memo_html,
     render_advisor_scenario_compare,
-    render_tax_optimization_panel,
 )
 from .reconciliation import (
     build_assumptions_overrides_df,
@@ -55,5 +54,4 @@ __all__ = [
     "build_t776_df",
     "build_federal_net_tax_build_up_df",
     "render_advisor_scenario_compare",
-    "render_tax_optimization_panel",
 ]
