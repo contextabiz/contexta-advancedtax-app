@@ -741,6 +741,41 @@ def format_plain_number(value: float) -> str:
     return f"{int(value)}" if float(value).is_integer() else f"{value:.2f}"
 
 
+def calculate_work_from_home_expense_summary(
+    *,
+    months_worked_from_home: float,
+    workspace_percentage: float,
+    annual_rent: float,
+    annual_utilities: float,
+    annual_internet: float,
+    annual_home_maintenance: float,
+    office_supplies: float,
+    other_workspace_costs: float,
+) -> dict[str, float]:
+    months_factor = min(max(float(months_worked_from_home), 0.0), 12.0) / 12.0
+    workspace_factor = min(max(float(workspace_percentage), 0.0), 100.0) / 100.0
+    proration_factor = months_factor * workspace_factor
+    shared_cost_base = (
+        float(annual_rent)
+        + float(annual_utilities)
+        + float(annual_internet)
+        + float(annual_home_maintenance)
+        + float(other_workspace_costs)
+    )
+    shared_cost_claim = shared_cost_base * proration_factor
+    direct_cost_claim = float(office_supplies)
+    total_claim = shared_cost_claim + direct_cost_claim
+    return {
+        "months_factor": months_factor,
+        "workspace_factor": workspace_factor,
+        "proration_factor": proration_factor,
+        "shared_cost_base": shared_cost_base,
+        "shared_cost_claim": shared_cost_claim,
+        "direct_cost_claim": direct_cost_claim,
+        "total_claim": total_claim,
+    }
+
+
 
 
 def render_answer_summary_sheet(
@@ -1775,7 +1810,28 @@ child_care_expenses = float(st.session_state.get("child_care_expenses", 0.0))
 moving_expenses = float(st.session_state.get("moving_expenses", 0.0))
 support_payments_deduction = float(st.session_state.get("support_payments_deduction", 0.0))
 carrying_charges = float(st.session_state.get("carrying_charges", 0.0))
-other_employment_expenses = float(st.session_state.get("other_employment_expenses", 0.0))
+other_employment_expenses_manual = float(st.session_state.get("other_employment_expenses_manual", st.session_state.get("other_employment_expenses", 0.0)))
+wfh_months_worked_from_home = float(st.session_state.get("wfh_months_worked_from_home", 0.0))
+wfh_workspace_percentage = float(st.session_state.get("wfh_workspace_percentage", 0.0))
+wfh_annual_rent = float(st.session_state.get("wfh_annual_rent", 0.0))
+wfh_annual_utilities = float(st.session_state.get("wfh_annual_utilities", 0.0))
+wfh_annual_internet = float(st.session_state.get("wfh_annual_internet", 0.0))
+wfh_annual_home_maintenance = float(st.session_state.get("wfh_annual_home_maintenance", 0.0))
+wfh_office_supplies = float(st.session_state.get("wfh_office_supplies", 0.0))
+wfh_other_workspace_costs = float(st.session_state.get("wfh_other_workspace_costs", 0.0))
+wfh_expense_summary = calculate_work_from_home_expense_summary(
+    months_worked_from_home=wfh_months_worked_from_home,
+    workspace_percentage=wfh_workspace_percentage,
+    annual_rent=wfh_annual_rent,
+    annual_utilities=wfh_annual_utilities,
+    annual_internet=wfh_annual_internet,
+    annual_home_maintenance=wfh_annual_home_maintenance,
+    office_supplies=wfh_office_supplies,
+    other_workspace_costs=wfh_other_workspace_costs,
+)
+other_employment_expenses = other_employment_expenses_manual + wfh_expense_summary["total_claim"]
+st.session_state["other_employment_expenses"] = other_employment_expenses
+st.session_state["work_from_home_expense_total"] = wfh_expense_summary["total_claim"]
 other_deductions = float(st.session_state.get("other_deductions", 0.0))
 net_capital_loss_carryforward = float(st.session_state.get("net_capital_loss_carryforward", 0.0))
 other_loss_carryforward = float(st.session_state.get("other_loss_carryforward", 0.0))
@@ -2414,11 +2470,11 @@ if current_step == 4:
             100.0,
             "Use this for deductible investment carrying charges or interest. Do not include personal credit-card or mortgage interest.",
         )
-        other_employment_expenses = number_input(
-            "Other Employment Expenses (line 22900)",
-            "other_employment_expenses",
+        other_employment_expenses_manual = number_input(
+            "Other Employment Expenses Not From The Worksheet (line 22900)",
+            "other_employment_expenses_manual",
             100.0,
-            "Use this for deductible employment expenses not already included elsewhere.",
+            "Use this for deductible employment expenses not already included in the work-from-home worksheet below.",
         )
         other_deductions = number_input(
             "Other Deductions",
@@ -2426,6 +2482,85 @@ if current_step == 4:
             100.0,
             "Use this only for deductible amounts not already covered above so you do not double count them.",
         )
+        with st.container(border=True):
+            st.markdown("##### T777 Workspace-In-The-Home Expenses")
+            st.caption("Use this mini worksheet only if you are reviewing workspace-in-the-home expenses or other deductible employment supplies that should flow to line 22900.")
+            wfh_col1, wfh_col2, wfh_col3 = st.columns(3)
+            wfh_months_worked_from_home = number_input(
+                "Months workspace was used for employment",
+                "wfh_months_worked_from_home",
+                1.0,
+                "Enter the number of months the workspace-in-the-home was used for employment duties during the year.",
+            )
+            wfh_workspace_percentage = number_input(
+                "Employment-use percentage of workspace",
+                "wfh_workspace_percentage",
+                1.0,
+                "Enter the employment-use portion of the workspace-in-the-home as a percentage.",
+            )
+            wfh_annual_rent = number_input(
+                "Rent paid for the home",
+                "wfh_annual_rent",
+                100.0,
+                "Enter total rent paid for the year if rent is part of the workspace-in-the-home claim.",
+            )
+            wfh_annual_utilities = number_input(
+                "Utilities for the home",
+                "wfh_annual_utilities",
+                100.0,
+                "Enter total heat, electricity, and similar utility costs for the year if applicable.",
+            )
+            wfh_annual_internet = number_input(
+                "Internet access fees",
+                "wfh_annual_internet",
+                50.0,
+                "Enter internet access fees if they form part of the workspace-in-the-home review.",
+            )
+            wfh_annual_home_maintenance = number_input(
+                "Maintenance and minor repair costs",
+                "wfh_annual_home_maintenance",
+                100.0,
+                "Enter maintenance or minor repair costs that relate to the home workspace if applicable.",
+            )
+            wfh_office_supplies = number_input(
+                "Supplies consumed directly for employment duties",
+                "wfh_office_supplies",
+                50.0,
+                "Enter deductible supplies consumed directly in performing employment duties.",
+            )
+            wfh_other_workspace_costs = number_input(
+                "Other workspace-in-the-home costs",
+                "wfh_other_workspace_costs",
+                100.0,
+                "Use this only for other workspace-in-the-home costs not already entered above.",
+            )
+            wfh_expense_summary = calculate_work_from_home_expense_summary(
+                months_worked_from_home=wfh_months_worked_from_home,
+                workspace_percentage=wfh_workspace_percentage,
+                annual_rent=wfh_annual_rent,
+                annual_utilities=wfh_annual_utilities,
+                annual_internet=wfh_annual_internet,
+                annual_home_maintenance=wfh_annual_home_maintenance,
+                office_supplies=wfh_office_supplies,
+                other_workspace_costs=wfh_other_workspace_costs,
+            )
+            other_employment_expenses = other_employment_expenses_manual + wfh_expense_summary["total_claim"]
+            st.session_state["other_employment_expenses"] = other_employment_expenses
+            st.session_state["work_from_home_expense_total"] = wfh_expense_summary["total_claim"]
+            render_metric_row(
+                [
+                    ("Workspace Cost Base", wfh_expense_summary["shared_cost_base"]),
+                    ("Employment-Use Portion", wfh_expense_summary["shared_cost_claim"]),
+                    ("Direct Supplies", wfh_expense_summary["direct_cost_claim"]),
+                    ("T777 Worksheet Total", wfh_expense_summary["total_claim"]),
+                ],
+                4,
+            )
+            st.caption(
+                f"Line 22900 now includes {format_currency(other_employment_expenses_manual)} of other employment expenses plus "
+                f"{format_currency(wfh_expense_summary['total_claim'])} from the workspace-in-the-home worksheet, for a combined "
+                f"{format_currency(other_employment_expenses)}."
+            )
         net_capital_loss_carryforward = number_input(
             "Net Capital Loss Carryforward",
             "net_capital_loss_carryforward",
@@ -3662,6 +3797,16 @@ calculation_inputs = {
             "support_payments_deduction": support_payments_deduction,
             "carrying_charges": carrying_charges,
             "other_employment_expenses": other_employment_expenses,
+            "other_employment_expenses_manual": other_employment_expenses_manual,
+            "work_from_home_expense_total": wfh_expense_summary["total_claim"],
+            "wfh_months_worked_from_home": wfh_months_worked_from_home,
+            "wfh_workspace_percentage": wfh_workspace_percentage,
+            "wfh_annual_rent": wfh_annual_rent,
+            "wfh_annual_utilities": wfh_annual_utilities,
+            "wfh_annual_internet": wfh_annual_internet,
+            "wfh_annual_home_maintenance": wfh_annual_home_maintenance,
+            "wfh_office_supplies": wfh_office_supplies,
+            "wfh_other_workspace_costs": wfh_other_workspace_costs,
             "other_deductions": other_deductions,
             "net_capital_loss_carryforward": net_capital_loss_carryforward,
             "other_loss_carryforward": other_loss_carryforward,
