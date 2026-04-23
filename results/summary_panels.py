@@ -375,6 +375,7 @@ def render_advisor_scenario_compare(
         format_currency=format_currency,
     )
     with st.container():
+        st.markdown("<div style='height:1px;background:rgba(255,255,255,0.08);margin:10px 0 16px 0;'></div>", unsafe_allow_html=True)
         st.markdown("##### Scenario Compare")
         st.caption("RRSP/FHSA scenario is subject to available contribution room and supportable deduction limits.")
         columns = st.columns(len(scenario_cards))
