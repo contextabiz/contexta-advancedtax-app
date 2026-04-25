@@ -741,6 +741,43 @@ def format_plain_number(value: float) -> str:
     return f"{int(value)}" if float(value).is_integer() else f"{value:.2f}"
 
 
+def render_screening_questions(
+    intro: str,
+    questions: list[dict[str, object]],
+) -> dict[str, bool]:
+    answers: dict[str, bool] = {}
+    with st.container(border=True):
+        st.markdown("#### Quick Interview")
+        st.caption(intro)
+        columns = st.columns(2)
+        for index, question in enumerate(questions):
+            answers[str(question["key"])] = checkbox_input(
+                str(question["label"]),
+                str(question["key"]),
+                value=bool(question.get("value", False)),
+                help_text=question.get("help_text"),
+                container=columns[index % len(columns)],
+            )
+    return answers
+
+
+def render_screening_summary(
+    *,
+    recommended_sections: list[str],
+    note: str,
+    caution: str | None = None,
+) -> None:
+    with st.container(border=True):
+        st.markdown("**What looks worth your time**")
+        if recommended_sections:
+            st.write(f"Open {', '.join(recommended_sections)} first.")
+        else:
+            st.write("Nothing obvious is being triggered right now, so you can likely keep this step light.")
+        st.caption(f"Why this matters: {note}")
+        if caution:
+            st.caption(f"Watch for duplication: {caution}")
+
+
 def calculate_work_from_home_expense_summary(
     *,
     months_worked_from_home: float,
@@ -788,7 +825,11 @@ def render_answer_summary_sheet(
     ready_count = int((readiness_df["Status"] == "Ready").sum()) if not readiness_df.empty else 0
     review_count = int((readiness_df["Status"] == "Review").sum()) if not readiness_df.empty else 0
     missing_count = int((readiness_df["Status"] == "Missing").sum()) if not readiness_df.empty else 0
-    return_memo_text = results_build_return_memo_html(result, format_currency=format_currency)
+    return_memo_text = results_build_return_memo_html(
+        result,
+        calculation_inputs,
+        format_currency=format_currency,
+    )
     memo_shell_bg = "#0D1522"
     memo_border = "rgba(255,255,255,0.08)"
     memo_label_color = "#8FA8C6"
@@ -1975,7 +2016,48 @@ if current_step == 1:
 if current_step == 2:
     st.markdown("### 2) Property and Capital Schedules")
     st.caption("Only open this if you have rental properties, real estate sales, share sales, crypto, or other capital-property activity. If none of these apply, you can go straight to Next.")
-    with st.expander("Rental", expanded=False):
+    step2_screening = render_screening_questions(
+        "Answer these first so the estimator can point you to the right property or capital worksheet.",
+        [
+            {
+                "key": "screen_step2_rental_activity",
+                "label": "Did you own a rental property or have rental income and expenses this year?",
+                "value": bool(st.session_state.get("rental_schedules")),
+            },
+            {
+                "key": "screen_step2_capital_sale",
+                "label": "Did you sell shares, ETFs, crypto, or other capital property?",
+                "value": bool(st.session_state.get("capital_gain_schedules")),
+            },
+            {
+                "key": "screen_step2_real_estate_sale",
+                "label": "Did you have a real estate or principal residence sale to review?",
+                "value": any(
+                    str(record.get("property_type", "")).strip() == "Real estate"
+                    for record in st.session_state.get("capital_gain_schedules", [])
+                ),
+            },
+            {
+                "key": "screen_step2_capital_loss_review",
+                "label": "Do you have prior-year capital losses you may want to use against gains?",
+                "value": float(st.session_state.get("net_capital_loss_carryforward", 0.0)) > 0.0,
+            },
+        ],
+    )
+    step2_recommended_sections: list[str] = []
+    if step2_screening["screen_step2_rental_activity"]:
+        step2_recommended_sections.append("Rental")
+    if (
+        step2_screening["screen_step2_capital_sale"]
+        or step2_screening["screen_step2_real_estate_sale"]
+        or step2_screening["screen_step2_capital_loss_review"]
+    ):
+        step2_recommended_sections.append("Capital Gains")
+    render_screening_summary(
+        recommended_sections=step2_recommended_sections,
+        note="Property and capital entries can change taxable capital gains, rental income, and any carryforward loss usage on the return.",
+    )
+    with st.expander("Rental", expanded=step2_screening["screen_step2_rental_activity"]):
         st.caption("Open this only if you have rental income or rental expenses.")
         rental_schedule_df = render_record_card_editor(
         "Rental Properties",
@@ -2002,7 +2084,14 @@ if current_step == 2:
         ],
         "Enter one card per property. The app totals the main T776 expense categories and then subtracts CCA.",
     )
-    with st.expander("Capital Gains", expanded=False):
+    with st.expander(
+        "Capital Gains",
+        expanded=(
+            step2_screening["screen_step2_capital_sale"]
+            or step2_screening["screen_step2_real_estate_sale"]
+            or step2_screening["screen_step2_capital_loss_review"]
+        ),
+    ):
         st.caption("Open this only if you sold shares, real estate, crypto, or other capital property.")
         capital_schedule_df = render_record_card_editor(
         "Capital Gains Schedule",
@@ -2190,7 +2279,72 @@ ei_withheld_total = ei_withheld + float(t4_wizard_totals.get("box18_ei", 0.0))
 if current_step == 3:
     st.markdown("### 3) Income and Investment")
     st.caption("Most users can skip this section if all of their income is already covered by slips. Use it only for extra income, manual additions, or when you want a clearer worksheet trail.")
-    with st.expander("Common Income", expanded=False):
+    step3_screening = render_screening_questions(
+        "Use these questions to decide whether anything still belongs here beyond the slips already entered.",
+        [
+            {
+                "key": "screen_step3_manual_employment",
+                "label": "Do you have employment, pension, RRSP/RRIF, or other taxable income not already on slips entered above?",
+                "value": any(
+                    float(st.session_state.get(key, 0.0)) > 0.0
+                    for key in ["employment_income", "pension_income", "rrsp_rrif_income", "other_income"]
+                ),
+            },
+            {
+                "key": "screen_step3_manual_rental_capital",
+                "label": "Do you need manual rental or taxable capital gain entries not already covered by the property cards?",
+                "value": any(
+                    float(st.session_state.get(key, 0.0)) > 0.0
+                    for key in ["net_rental_income", "taxable_capital_gains"]
+                ),
+            },
+            {
+                "key": "screen_step3_investment_income",
+                "label": "Do you have interest, dividends, or investment income not already captured by T3, T5, or T4PS slips?",
+                "value": any(
+                    float(st.session_state.get(key, 0.0)) > 0.0
+                    for key in [
+                        "interest_income",
+                        "eligible_dividends",
+                        "non_eligible_dividends",
+                        "t5_eligible_dividends_taxable",
+                        "t5_non_eligible_dividends_taxable",
+                        "t3_eligible_dividends_taxable",
+                        "t3_non_eligible_dividends_taxable",
+                    ]
+                ),
+            },
+            {
+                "key": "screen_step3_foreign_income",
+                "label": "Do you need to add foreign income or foreign tax amounts not already shown on slips?",
+                "value": any(
+                    float(st.session_state.get(key, 0.0)) > 0.0
+                    for key in ["foreign_income", "foreign_tax_paid"]
+                ),
+            },
+        ],
+    )
+    step3_common_income_expanded = (
+        step3_screening["screen_step3_manual_employment"]
+        or step3_screening["screen_step3_manual_rental_capital"]
+        or step3_screening["screen_step3_investment_income"]
+        or step3_screening["screen_step3_foreign_income"]
+    )
+    step3_dividends_expanded = (
+        step3_screening["screen_step3_investment_income"]
+        or step3_screening["screen_step3_foreign_income"]
+    )
+    step3_recommended_sections: list[str] = []
+    if step3_common_income_expanded:
+        step3_recommended_sections.append("Common Income")
+    if step3_dividends_expanded:
+        step3_recommended_sections.append("Dividend Details")
+    render_screening_summary(
+        recommended_sections=step3_recommended_sections,
+        note="This step is mainly for income that was not already imported from slips, or for a manual worksheet trail where the return needs one.",
+        caution="T4, T4A, T3, T5, and T4PS amounts are already flowing in automatically once entered through the slip sections.",
+    )
+    with st.expander("Common Income", expanded=step3_common_income_expanded):
         st.caption("Open this only if you need income not already covered by slips.")
         income_col1, income_col2, income_col3 = st.columns(3)
         employment_income_manual = number_input("Manual Employment Income", "employment_income", 1000.0)
@@ -2233,7 +2387,7 @@ if current_step == 3:
             "Enter the actual cash dividend received. Do not gross this up yourself.",
         )
 
-    with st.expander("Dividend Details", expanded=False):
+    with st.expander("Dividend Details", expanded=step3_dividends_expanded):
         st.caption("Open this only if you need to review or adjust dividend slip amounts.")
         div_col1, div_col2, div_col3 = st.columns(3)
         t5_eligible_dividends_taxable = number_input(
@@ -2436,7 +2590,73 @@ if current_step == 3:
 if current_step == 4:
     st.markdown("### 4) Deductions")
     st.caption("Use this section only if you have deductions that reduce income, such as RRSP or FHSA contributions, moving expenses, child care, support payments, or investment carrying charges. If you only have slips and no extra deductions, you can usually skip it.")
-    with st.expander("Registered Plans and Payroll", expanded=False):
+    step4_screening = render_screening_questions(
+        "Answer these first and the estimator will point you to the deduction areas most likely to matter.",
+        [
+            {
+                "key": "screen_step4_rrsp_fhsa",
+                "label": "Did you contribute to an RRSP or FHSA and intend to deduct some of it this year?",
+                "value": any(float(st.session_state.get(key, 0.0)) > 0.0 for key in ["rrsp_deduction", "fhsa_deduction"]),
+            },
+            {
+                "key": "screen_step4_family_work_move",
+                "label": "Did you pay child care, make deductible support payments, or move for work, school, or business?",
+                "value": any(
+                    float(st.session_state.get(key, 0.0)) > 0.0
+                    for key in ["child_care_expenses", "moving_expenses", "support_payments_deduction"]
+                ),
+            },
+            {
+                "key": "screen_step4_work_from_home",
+                "label": "Did you work from home and pay rent, utilities, internet, or employment supplies?",
+                "value": any(
+                    float(st.session_state.get(key, 0.0)) > 0.0
+                    for key in [
+                        "wfh_months_worked_from_home",
+                        "wfh_workspace_percentage",
+                        "wfh_annual_rent",
+                        "wfh_annual_utilities",
+                        "wfh_annual_internet",
+                        "wfh_annual_home_maintenance",
+                        "wfh_office_supplies",
+                        "wfh_other_workspace_costs",
+                    ]
+                ),
+            },
+            {
+                "key": "screen_step4_employment_investment",
+                "label": "Do you have carrying charges, other employment expenses, or loss carryforwards to deduct?",
+                "value": any(
+                    float(st.session_state.get(key, 0.0)) > 0.0
+                    for key in [
+                        "carrying_charges",
+                        "other_employment_expenses_manual",
+                        "other_deductions",
+                        "net_capital_loss_carryforward",
+                        "other_loss_carryforward",
+                    ]
+                ),
+            },
+        ],
+    )
+    step4_registered_expanded = step4_screening["screen_step4_rrsp_fhsa"]
+    step4_family_expanded = step4_screening["screen_step4_family_work_move"]
+    step4_investment_expanded = (
+        step4_screening["screen_step4_work_from_home"]
+        or step4_screening["screen_step4_employment_investment"]
+    )
+    step4_recommended_sections: list[str] = []
+    if step4_registered_expanded:
+        step4_recommended_sections.append("Registered Plans and Payroll")
+    if step4_family_expanded:
+        step4_recommended_sections.append("Family, Work, and Moving")
+    if step4_investment_expanded:
+        step4_recommended_sections.append("Investment, Employment, and Carryforwards")
+    render_screening_summary(
+        recommended_sections=step4_recommended_sections,
+        note="Deductions reduce net income first, so this is often where both tax owing and income-tested credit results can still move.",
+    )
+    with st.expander("Registered Plans and Payroll", expanded=step4_registered_expanded):
         st.caption("Open this only if you are claiming RRSP, FHSA, RPP, or dues.")
         ded_col1, ded_col2, ded_col3 = st.columns(3)
         rrsp_deduction = number_input(
@@ -2454,14 +2674,14 @@ if current_step == 4:
         rpp_contribution = number_input("RPP Contribution", "rpp_contribution", 500.0)
         union_dues = number_input("Union / Professional Dues (line 22200)", "union_dues", 100.0)
 
-    with st.expander("Family, Work, and Moving", expanded=False):
+    with st.expander("Family, Work, and Moving", expanded=step4_family_expanded):
         st.caption("Open this only if you have child care, moving, or support deductions.")
         ded_col4, ded_col5, ded_col6 = st.columns(3)
         child_care_expenses = number_input("Child Care Expenses (line 22100)", "child_care_expenses", 100.0)
         moving_expenses = number_input("Moving Expenses (line 21900)", "moving_expenses", 100.0)
         support_payments_deduction = number_input("Deductible Support Payments (line 22000)", "support_payments_deduction", 100.0)
 
-    with st.expander("Investment, Employment, and Carryforwards", expanded=False):
+    with st.expander("Investment, Employment, and Carryforwards", expanded=step4_investment_expanded):
         st.caption("Open this only if you have carrying charges, employment expenses, or loss carryforwards.")
         ded_col7, ded_col8, ded_col9 = st.columns(3)
         carrying_charges = number_input(
@@ -2587,6 +2807,121 @@ union_dues += float(t4_wizard_totals.get("box44_union_dues", 0.0))
 if current_step == 5:
     st.markdown("### 5) Credits, Carryforwards, and Special Cases")
     st.caption("Most users only need one or two parts of this section. Start with the common items first and leave the rest alone unless a slip, receipt, or worksheet clearly points you there.")
+    step5_screening = render_screening_questions(
+        "Use these interview questions first so the estimator can point you to the Step 5 areas most likely to deserve time.",
+        [
+            {
+                "key": "screen_step5_household",
+                "label": "Did you support a spouse, partner, or dependant with low income or disability-related claim potential?",
+                "value": any(
+                    bool(st.session_state.get(key, False))
+                    for key in [
+                        "spouse_claim_enabled",
+                        "has_spouse_end_of_year",
+                        "eligible_dependant_claim_enabled",
+                        "dependant_lived_with_you",
+                        "spouse_disability_transfer_available",
+                        "dependant_disability_transfer_available",
+                    ]
+                ),
+            },
+            {
+                "key": "screen_step5_common_credits",
+                "label": "Did you have tuition, student loan interest, medical expenses, or donations to review?",
+                "value": (
+                    float(t2202_wizard_totals.get("box26_total_eligible_tuition", 0.0)) > 0.0
+                    or float(t2202_wizard_totals.get("box23_session_tuition", 0.0)) > 0.0
+                    or any(
+                        float(st.session_state.get(key, 0.0)) > 0.0
+                        for key in [
+                            "student_loan_interest",
+                            "medical_expenses_paid",
+                            "medical_expenses_eligible",
+                            "charitable_donations",
+                            "donations_eligible_total",
+                        ]
+                    )
+                ),
+            },
+            {
+                "key": "screen_step5_refundable",
+                "label": "Do you expect refundable support such as CWB, training credit, or other income-tested refundable amounts?",
+                "value": any(
+                    bool(st.session_state.get(key, False))
+                    for key in [
+                        "cwb_basic_eligible",
+                        "cwb_disability_supplement_eligible",
+                        "spouse_cwb_disability_supplement_eligible",
+                        "medical_expense_supplement_eligible",
+                    ]
+                )
+                or any(
+                    float(st.session_state.get(key, 0.0)) > 0.0
+                    for key in [
+                        "canada_workers_benefit",
+                        "canada_training_credit_limit_available",
+                        "refundable_credits",
+                    ]
+                ),
+            },
+            {
+                "key": "screen_step5_carryforwards",
+                "label": "Do you have tuition, donation, or other prior-year carryforwards or transfers to use?",
+                "value": any(
+                    bool(st.session_state.get(key))
+                    for key in ["tuition_carryforwards", "donation_carryforwards", "provincial_credit_lines"]
+                )
+                or any(
+                    float(st.session_state.get(key, 0.0)) > 0.0
+                    for key in ["tuition_transfer_from_spouse", "tuition_amount_claim"]
+                ),
+            },
+            {
+                "key": "screen_step5_foreign_province_manual",
+                "label": "Do you have foreign tax, province-specific credits, or manual worksheet amounts to enter?",
+                "value": any(
+                    float(st.session_state.get(key, 0.0)) > 0.0
+                    for key in [
+                        "foreign_income",
+                        "foreign_tax_paid",
+                        "t2209_non_business_tax_paid",
+                        "t2209_net_foreign_non_business_income",
+                        "t2209_net_income_override",
+                        "t2209_basic_federal_tax_override",
+                        "t2036_provincial_tax_otherwise_payable_override",
+                        "disability_amount_claim",
+                        "additional_federal_credits",
+                        "additional_provincial_credit_amount",
+                    ]
+                )
+                or any(
+                    bool(st.session_state.get(key, False))
+                    for key in ["persist_bc_renters_credit_eligible", "persist_bc_home_renovation_eligible", "persist_pe_volunteer_credit_eligible"]
+                ),
+            },
+        ],
+    )
+    step5_common_expanded = step5_screening["screen_step5_common_credits"]
+    step5_household_expanded = step5_screening["screen_step5_household"]
+    step5_refundable_expanded = step5_screening["screen_step5_refundable"]
+    step5_carryforwards_expanded = step5_screening["screen_step5_carryforwards"]
+    step5_foreign_province_expanded = step5_screening["screen_step5_foreign_province_manual"]
+    step5_recommended_sections: list[str] = []
+    if step5_common_expanded:
+        step5_recommended_sections.append("Common Credits You Might Claim")
+    if step5_household_expanded:
+        step5_recommended_sections.append("Family and Household Questions")
+    if step5_refundable_expanded:
+        step5_recommended_sections.append("Refundable Credits and Income-Tested Support")
+    if step5_carryforwards_expanded:
+        step5_recommended_sections.append("Prior-Year Carryforwards and Transfers")
+    if step5_foreign_province_expanded:
+        step5_recommended_sections.append("Foreign / Province-Specific Areas")
+    render_screening_summary(
+        recommended_sections=step5_recommended_sections,
+        note="This is where many returns either find an extra claim opportunity or avoid opening advanced areas that do not actually apply.",
+        caution="Only enter manual worksheet amounts here if they are not already flowing in from slips, earlier steps, or the household interview.",
+    )
     step5_render_optimization_checkpoint(
         step5_build_optimization_preview(
             session_state=st.session_state,
@@ -2617,7 +2952,7 @@ if current_step == 5:
         t2202_wizard_totals=t2202_wizard_totals,
         province_name=province_name,
     )
-    with st.expander("Common Credits You Might Claim", expanded=False):
+    with st.expander("Common Credits You Might Claim", expanded=step5_common_expanded):
         step5_render_section_intro(step5_section_statuses["common_credits"])
         spouse_amount_claim = number_input(
             "Manual spouse / common-law claim amount only if you are overriding the auto estimate",
@@ -2668,7 +3003,7 @@ if current_step == 5:
             100.0,
             "Manual only if needed. Use this only for refundable credits not already covered elsewhere in this section.",
         )
-    with st.expander("Family and Household Questions", expanded=False):
+    with st.expander("Family and Household Questions", expanded=step5_household_expanded):
         step5_render_section_intro(step5_section_statuses["household"])
         household_tabs = st.tabs(["Your Situation", "Dependant Details", "Possible Claim Conflicts"])
         with household_tabs[0]:
@@ -2863,7 +3198,7 @@ if current_step == 5:
                 "medical_expenses_amount",
             ].sum()
         )
-    with st.expander("Less Common or Manual Overrides", expanded=False):
+    with st.expander("Less Common or Manual Overrides", expanded=step5_foreign_province_expanded):
         step5_render_section_intro(step5_section_statuses["manual_overrides"])
         disability_amount_claim = number_input(
             "Disability amount claim base",
@@ -2895,7 +3230,7 @@ if current_step == 5:
             100.0,
             "Manual only if needed. Enter the final provincial credit amount only if you already worked it out elsewhere.",
         )
-    with st.expander("Refundable Credits and Income-Tested Support", expanded=False):
+    with st.expander("Refundable Credits and Income-Tested Support", expanded=step5_refundable_expanded):
         step5_render_section_intro(step5_section_statuses["refundable"])
         refundable_col1, refundable_col2 = st.columns(2)
         canada_workers_benefit = number_input(
@@ -2996,7 +3331,7 @@ if current_step == 5:
     st.session_state["persist_cwb_disability_supplement_eligible"] = cwb_disability_supplement_eligible
     st.session_state["persist_spouse_cwb_disability_supplement_eligible"] = spouse_cwb_disability_supplement_eligible
     st.session_state["persist_canada_workers_benefit"] = canada_workers_benefit
-    with st.expander("Province-Specific Credits and Special Schedules", expanded=False):
+    with st.expander("Province-Specific Credits and Special Schedules", expanded=step5_foreign_province_expanded):
         step5_render_section_intro(step5_section_statuses["province_special"])
         on_col1, on_col2, on_col3 = st.columns(3)
         ontario_caregiver_amount = on_col1.number_input(
@@ -3064,7 +3399,7 @@ if current_step == 5:
             )
         )
 
-    with st.expander("Foreign Income, Dividend Credits, and Manual Overrides", expanded=False):
+    with st.expander("Foreign Income, Dividend Credits, and Manual Overrides", expanded=step5_foreign_province_expanded):
         step5_render_section_intro(step5_section_statuses["foreign"])
         fd_col1, fd_col2 = st.columns(2)
         foreign_income = fd_col1.number_input(
@@ -3163,7 +3498,7 @@ if current_step == 5:
             100.0,
         )
 
-    with st.expander("Prior-Year Carryforwards and Transfers", expanded=False):
+    with st.expander("Prior-Year Carryforwards and Transfers", expanded=step5_carryforwards_expanded):
         step5_render_section_intro(step5_section_statuses["carryforwards"])
         carryforward_tabs = st.tabs(["Tuition Carryforward", "Donation Carryforward", f"{province_name} Additional Lines"])
         with carryforward_tabs[0]:
@@ -3372,7 +3707,46 @@ schedule9_total_regular_donations_unused = schedule9_current_year_donations_avai
 if current_step == 6:
     st.markdown("### 6) Payments and Withholdings")
     st.caption("You can skip this section unless you made instalments, had extra tax deducted outside slips, or need to add other payments not already captured from your slips.")
-    with st.expander("Additional Payments and Withholding", expanded=False):
+    step6_screening = render_screening_questions(
+        "Answer these first so the estimator can tell whether any extra payment or withholding entries are still needed.",
+        [
+            {
+                "key": "screen_step6_slip_withholding",
+                "label": "Is most of your withholding already shown on T4 or T4A slips entered above?",
+                "value": (
+                    float(t4_wizard_totals.get("box22_tax_withheld", 0.0)) > 0.0
+                    or float(t4a_wizard_totals.get("box22_tax_withheld", 0.0)) > 0.0
+                ),
+            },
+            {
+                "key": "screen_step6_installments",
+                "label": "Did you make tax instalment payments during the year?",
+                "value": float(st.session_state.get("installments_paid", 0.0)) > 0.0,
+            },
+            {
+                "key": "screen_step6_other_payments",
+                "label": "Did you make other tax payments or carry in another payment credit not already entered?",
+                "value": float(st.session_state.get("other_payments", 0.0)) > 0.0,
+            },
+            {
+                "key": "screen_step6_manual_withholding",
+                "label": "Do you need to enter extra withholding that is not already shown on slips?",
+                "value": float(st.session_state.get("income_tax_withheld", 0.0)) > 0.0,
+            },
+        ],
+    )
+    step6_additional_payments_expanded = (
+        step6_screening["screen_step6_installments"]
+        or step6_screening["screen_step6_other_payments"]
+        or step6_screening["screen_step6_manual_withholding"]
+    )
+    step6_recommended_sections = ["Additional Payments and Withholding"] if step6_additional_payments_expanded else []
+    render_screening_summary(
+        recommended_sections=step6_recommended_sections,
+        note="This step is mainly for amounts not already carried in from slips, especially instalments, separate tax payments, or extra withholding.",
+        caution="Do not repeat Box 22 or other slip withholding here if it is already included above.",
+    )
+    with st.expander("Additional Payments and Withholding", expanded=step6_additional_payments_expanded):
         st.caption("Open this only if you made instalments or have extra payments or withholding.")
         pay_col1, pay_col2, pay_col3 = st.columns(3)
         income_tax_withheld = number_input("Other Income Tax Deducted at Source (line 43700)", "income_tax_withheld", 100.0)

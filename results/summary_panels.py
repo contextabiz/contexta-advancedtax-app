@@ -115,8 +115,83 @@ def build_advisor_summary_lead(result: dict, *, format_currency, include_outcome
     return f"{outcome} {body}" if include_outcome else body
 
 
-def build_return_memo_html(result: dict, *, format_currency) -> str:
+def build_intake_summary_context(calculation_inputs: dict | None) -> dict[str, object]:
+    inputs = calculation_inputs or {}
+    spouse_household_signal = bool(inputs.get("screen_step5_household", False))
+    tuition_signal = bool(inputs.get("screen_step5_common_credits", False)) and (
+        float(inputs.get("student_loan_interest", 0.0)) > 0.0
+        or bool(inputs.get("screen_step5_carryforwards", False))
+        or float(inputs.get("tuition_amount_claim", 0.0)) > 0.0
+        or bool(inputs.get("tuition_carryforwards"))
+    )
+    deduction_signal = any(
+        bool(inputs.get(key, False))
+        for key in [
+            "screen_step4_rrsp_fhsa",
+            "screen_step4_family_work_move",
+            "screen_step4_work_from_home",
+            "screen_step4_employment_investment",
+        ]
+    )
+    work_from_home_signal = bool(inputs.get("screen_step4_work_from_home", False))
+    foreign_provincial_signal = bool(inputs.get("screen_step5_foreign_province_manual", False))
+    refundable_signal = bool(inputs.get("screen_step5_refundable", False))
+    payment_cleanup_signal = any(
+        bool(inputs.get(key, False))
+        for key in [
+            "screen_step6_installments",
+            "screen_step6_other_payments",
+            "screen_step6_manual_withholding",
+        ]
+    )
+
+    review_areas: list[str] = []
+    if spouse_household_signal:
+        review_areas.append("household positions")
+    if deduction_signal:
+        review_areas.append("deduction review")
+    if tuition_signal:
+        review_areas.append("tuition or carryforward review")
+    if foreign_provincial_signal:
+        review_areas.append("foreign or province-specific worksheets")
+    if payment_cleanup_signal:
+        review_areas.append("payment and withholding cleanup")
+
+    return {
+        "spouse_household_signal": spouse_household_signal,
+        "tuition_signal": tuition_signal,
+        "deduction_signal": deduction_signal,
+        "work_from_home_signal": work_from_home_signal,
+        "foreign_provincial_signal": foreign_provincial_signal,
+        "refundable_signal": refundable_signal,
+        "payment_cleanup_signal": payment_cleanup_signal,
+        "review_areas": review_areas,
+    }
+
+
+def join_with_and(items: list[str]) -> str:
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
+def build_return_memo_html(result: dict, calculation_inputs: dict | None = None, *, format_currency) -> str:
     memo_text = build_advisor_summary_lead(result, format_currency=format_currency, include_outcome=True)
+    intake_context = build_intake_summary_context(calculation_inputs)
+    review_areas = list(intake_context["review_areas"])
+    if review_areas:
+        memo_text = (
+            f"{memo_text} Based on the intake so far, the file still points most clearly to "
+            f"{join_with_and(review_areas)} before the estimate is treated as final."
+        )
+    elif bool(intake_context["refundable_signal"]):
+        memo_text = (
+            f"{memo_text} The intake also suggests refundable-support review may still matter before filing."
+        )
     highlight_style = (
         "display:inline-block;padding:1px 8px 2px 8px;border-radius:999px;"
         "background:rgba(94, 166, 255, 0.14);border:1px solid rgba(94, 166, 255, 0.22);"
@@ -231,12 +306,17 @@ def build_advisor_summary_scenarios(
     calculate_personal_tax_return,
     format_currency,
 ) -> list[dict[str, str]]:
+    intake_context = build_intake_summary_context(calculation_inputs)
     cards: list[dict[str, str]] = [
         {
             "title": "Current Return",
             "outcome": format_result_outcome_chip(current_result, format_currency=format_currency),
             "delta": "Current filed position",
-            "note": "Based on the inputs currently entered.",
+            "note": (
+                "Based on the inputs currently entered."
+                if not intake_context["review_areas"]
+                else f"Current filed position before {join_with_and(list(intake_context['review_areas']))} is fully worked through."
+            ),
         }
     ]
     if not calculation_inputs:
@@ -285,7 +365,11 @@ def build_advisor_summary_scenarios(
     spouse_net_income = float(calculation_inputs.get("spouse_net_income", 0.0))
     set_default_scenario(
         "With spouse amount",
-        "No spouse review opportunity is standing out yet from the current facts entered.",
+        (
+            "The intake is not currently pointing to a spouse support review strong enough to move this file."
+            if intake_context["spouse_household_signal"]
+            else "No spouse review opportunity is standing out yet from the current facts entered."
+        ),
     )
     if (
         bool(calculation_inputs.get("has_spouse_end_of_year", False))
@@ -296,7 +380,9 @@ def build_advisor_summary_scenarios(
     ):
         try_add_scenario(
             "With spouse amount",
-            "Assumes spouse amount review is completed using the spouse facts already entered.",
+            (
+                "You indicated spouse or household review facts during intake. This scenario assumes the spouse amount position is fully worked through using the spouse facts already entered."
+            ),
             {
                 "spouse_claim_enabled": True,
                 "spouse_amount_claim": 0.0,
@@ -307,7 +393,11 @@ def build_advisor_summary_scenarios(
     tuition_carryforward_available = float(current_result.get("schedule11_carryforward_available", 0.0))
     set_default_scenario(
         "With tuition review",
-        "No material tuition, carryforward, or student-loan review signal is standing out yet.",
+        (
+            "The intake does not yet show a strong tuition, carryforward, or student-loan review opportunity."
+            if intake_context["tuition_signal"]
+            else "No material tuition, carryforward, or student-loan review signal is standing out yet."
+        ),
     )
     if (
         current_year_tuition_available > 0.0
@@ -316,7 +406,9 @@ def build_advisor_summary_scenarios(
     ):
         try_add_scenario(
             "With tuition review",
-            "Assumes available tuition and carryforward amounts are fully reviewed and positioned.",
+            (
+                "You indicated tuition or carryforward review facts during intake. This scenario assumes available tuition, student-loan, and carryforward amounts are fully reviewed and positioned."
+            ),
             {
                 "tuition_amount_claim": current_year_tuition_available,
                 "schedule11_current_year_claim_requested": current_year_tuition_available,
@@ -330,7 +422,11 @@ def build_advisor_summary_scenarios(
     province = str(calculation_inputs.get("province", "ON") or "ON")
     set_default_scenario(
         "With deduction cleanup",
-        "No RRSP or FHSA bracket-step opportunity is standing out yet from the current inputs.",
+        (
+            "The intake is not yet showing a deduction review strong enough to support a bracket-step scenario."
+            if intake_context["deduction_signal"]
+            else "No RRSP or FHSA bracket-step opportunity is standing out yet from the current inputs."
+        ),
     )
     bracket_drop_target = build_bracket_drop_target(
         taxable_income=taxable_income,
@@ -343,12 +439,17 @@ def build_advisor_summary_scenarios(
         try_add_scenario(
             "With deduction cleanup",
             (
-                f"Assumes about {format_currency(contribution_needed)} of additional {deduction_label} contribution, "
-                f"claimed as a deduction, to bring taxable income down into the next lower {bracket_drop_target['label']}."
+                f"You indicated deduction-review facts during intake. This scenario assumes about {format_currency(contribution_needed)} "
+                f"of additional {deduction_label} contribution, claimed as a deduction, to bring taxable income down into the next lower "
+                f"{bracket_drop_target['label']}."
             ),
             {
                 deduction_key: float(calculation_inputs.get(deduction_key, 0.0)) + contribution_needed,
             },
+        )
+    elif intake_context["work_from_home_signal"]:
+        scenario_map["With deduction cleanup"]["note"] = (
+            "The intake points more toward employment or workspace deduction review than a clear RRSP/FHSA bracket-step move on the current facts."
         )
 
     cards.extend(
